@@ -208,6 +208,156 @@ void MCAPP_MotorSetSpeedPercent(uint8_t percent)
     mcappData.desiredSpeed = (uint16_t)(((uint32_t)MAX_MOTORSPEED * percent) / 100U);
 }
 /******************************************************************************
+ * Description: Software oscilloscope capture - see scope_commands.h. State is
+ *              a single-writer handoff between HAL_MC1ADCInterrupt() (owns it
+ *              while armed) and the command/publish side in main()'s context
+ *              (only touches it once SCOPE_IsReady(), i.e. once the ISR has
+ *              stopped writing), so no locking is needed - the same pattern
+ *              mcappData itself already relies on elsewhere in this file.
+ *****************************************************************************/
+#define SCOPE_RATE_TICKS_MIN  1U
+#define SCOPE_LENGTH_MIN      10U
+#define SCOPE_ADC_TICK_US     LOOPTIME_MICROSEC // 50us per HAL_MC1ADCInterrupt() call
+
+static volatile bool scopeArmed;
+static volatile bool scopeReady;
+// Defaults chosen against this motor's actual electrical rate, not arbitrary
+// round numbers: MAX_MOTORSPEED=4600 RPM with POLEPAIRS=2 gives one electrical
+// revolution every ~6.5ms at max speed (~13ms at the 50%-speed boot default -
+// see mcappData's initializer above). 10 ticks * 50us = 500us/sample gives
+// ~13 samples/electrical-cycle at max speed (~26 at the 50% default) - enough
+// to resolve waveform shape, not just a Nyquist-minimum zigzag - while the
+// default 50-sample length spans a 25ms window, i.e. several full electrical
+// cycles at any speed the motor actually runs at.
+static uint8_t scopeChannel;              // SCOPE_CHANNEL_* - defaults to SCOPE_CHANNEL_VDC (0)
+static uint16_t scopeRateTicks = 10U;     // 10 ticks * 50us = 500us default
+static uint16_t scopeLength = 50U;        // default capture length (500us * 50 = 25ms window)
+static uint16_t scopeTickCounter;
+static uint16_t scopeSampleIndex;
+static int16_t scopeBuffer[SCOPE_BUFFER_MAX];
+
+void SCOPE_SetChannel(uint8_t channel)
+{
+    if (channel > SCOPE_CHANNEL_MAX)
+    {
+        channel = SCOPE_CHANNEL_MAX;
+    }
+    scopeChannel = channel;
+}
+
+void SCOPE_SetRateMicroseconds(uint32_t us)
+{
+    uint32_t ticks = (us + (SCOPE_ADC_TICK_US / 2U)) / SCOPE_ADC_TICK_US; // round to nearest tick
+    if (ticks < SCOPE_RATE_TICKS_MIN)
+    {
+        ticks = SCOPE_RATE_TICKS_MIN;
+    }
+    if (ticks > 0xFFFFU)
+    {
+        ticks = 0xFFFFU;
+    }
+    scopeRateTicks = (uint16_t)ticks;
+}
+
+void SCOPE_SetLength(uint16_t length)
+{
+    if (length < SCOPE_LENGTH_MIN)
+    {
+        length = SCOPE_LENGTH_MIN;
+    }
+    else if (length > SCOPE_BUFFER_MAX)
+    {
+        length = SCOPE_BUFFER_MAX;
+    }
+    scopeLength = length;
+}
+
+void SCOPE_StartCapture(void)
+{
+    scopeReady = false;
+    scopeSampleIndex = 0;
+    scopeTickCounter = 0;
+    scopeArmed = true; // must be last - see the single-writer-handoff note above
+}
+
+bool SCOPE_IsReady(void)
+{
+    return scopeReady;
+}
+
+void SCOPE_ClearReady(void)
+{
+    scopeReady = false;
+}
+
+uint8_t SCOPE_GetChannel(void)
+{
+    return scopeChannel;
+}
+
+uint32_t SCOPE_GetRateMicroseconds(void)
+{
+    return (uint32_t)scopeRateTicks * SCOPE_ADC_TICK_US;
+}
+
+uint16_t SCOPE_GetLength(void)
+{
+    return scopeLength;
+}
+
+int16_t SCOPE_GetSample(uint16_t index)
+{
+    if (index >= scopeLength)
+    {
+        return 0;
+    }
+    return scopeBuffer[index];
+}
+
+// Called once per HAL_MC1ADCInterrupt() tick (every 50us) - see the call site there.
+static void SCOPE_Tick(void)
+{
+    if (!scopeArmed)
+    {
+        return;
+    }
+    if (++scopeTickCounter < scopeRateTicks)
+    {
+        return;
+    }
+    scopeTickCounter = 0;
+
+    int16_t value;
+    switch (scopeChannel)
+    {
+        case SCOPE_CHANNEL_SPEED:
+            value = mcappData.calculateSpeed.speedValue;
+            break;
+        case SCOPE_CHANNEL_DUTY:
+            value = mcappData.dutyCycle;
+            break;
+        case SCOPE_CHANNEL_IBUS:
+            value = mcappData.analogInputs.measureCurrent.Ibus;
+            break;
+        case SCOPE_CHANNEL_IA:
+            value = mcappData.analogInputs.measureCurrent.Ia;
+            break;
+        case SCOPE_CHANNEL_IB:
+            value = mcappData.analogInputs.measureCurrent.Ib;
+            break;
+        case SCOPE_CHANNEL_VDC:
+        default:
+            value = mcappData.analogInputs.measureVdc.value;
+            break;
+    }
+    scopeBuffer[scopeSampleIndex++] = value;
+    if (scopeSampleIndex >= scopeLength)
+    {
+        scopeArmed = false;
+        scopeReady = true;
+    }
+}
+/******************************************************************************
  * Description: The ADCAN19 Interrupt operates at 20kHz. The analog data such as
  *              the potentiometer voltage, Bus Current are read. It services
  *              the MCAPP_StateMachine routine as well.
@@ -220,12 +370,14 @@ void __attribute__((__interrupt__,no_auto_psv)) HAL_MC1ADCInterrupt()
         iotcTickDivider = 0;
         IOTC_RNWF11_Tick1ms();
     }
-/**  Routine to read the potentiometer value and the bus current value */    
-    HAL_MC1MotorInputsRead(&mcappData.analogInputs);  
-/**  Routine to run the Motor Control State Machine */    
+/**  Routine to read the potentiometer value and the bus current value */
+    HAL_MC1MotorInputsRead(&mcappData.analogInputs);
+/**  Routine to run the Motor Control State Machine */
     MCAPP_StateMachine();
+/**  Software oscilloscope sample point - see scope_commands.h */
+    SCOPE_Tick();
 
-    HAL_BoardServiceStepIsr();          
+    HAL_BoardServiceStepIsr();
     HAL_MC1ADCInterruptFlagClear();
 }
 /******************************************************************************

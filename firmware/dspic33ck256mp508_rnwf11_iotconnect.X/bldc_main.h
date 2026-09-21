@@ -66,6 +66,7 @@ extern "C" {
 #include "library/library-motor/motor_control_types.h"
 #include "library/library-motor/motor_control_declarations.h"
 #include "motor_commands.h"
+#include "scope_commands.h"
 // *****************************************************************************
 // *****************************************************************************
 // Section: MODE OF OPERATION

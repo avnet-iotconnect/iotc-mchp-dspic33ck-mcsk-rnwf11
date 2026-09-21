@@ -294,6 +294,8 @@ void HAL_MC1PWMSetDutyCyclesIdentical(int16_t dutyCycle)
 void HAL_MC1MotorInputsRead(MCAPP_MEASURE_T *pMotorInputs)
 {   
     pMotorInputs->measureCurrent.Ibus = (int16_t)(ADCBUF_IBUS);
+    pMotorInputs->measureCurrent.Ia = (int16_t)(ADCBUF_IA);
+    pMotorInputs->measureCurrent.Ib = (int16_t)(ADCBUF_IB);
     pMotorInputs->measurePot = (int16_t)(ADCBUF_POT >>1);
     pMotorInputs->measureVdc.value = (int16_t)(ADCBUF_VBUS >>1);
 }

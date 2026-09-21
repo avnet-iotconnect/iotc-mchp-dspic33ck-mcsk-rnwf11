@@ -308,7 +308,18 @@ void Init_ADC(void)
     /* Trigger Source for Analog Input #11  = 0b0100 */
     ADTRIG2Hbits.TRGSRC11 = 0x4;
 
-    /* Trigger Source for Analog Input #4  = 0b0100 */    
+    /* Trigger Source for Analog Input #4  = 0b0100 */
     ADTRIG1Lbits.TRGSRC4 = 0x4;
+
+    /* Dedicated ADC Core 0 (AN0, OA1OUT/Phase A current) and Core 1 (AN1,
+     * OA2OUT/Phase B current) were already powered on/enabled above and
+     * already channel-selected to AN0/AN1 respectively (ADCON4Hbits.C0CHS/
+     * C1CHS, both left at their reset value of 0 = AN0/AN1) - they just
+     * never had a trigger source configured, so they never actually
+     * converted. Same PWM1 Trigger 1 source as the other channels above. */
+    /* Trigger Source for Analog Input #0 (IA) = 0b0100 */
+    ADTRIG0Lbits.TRGSRC0 = 0x4;
+    /* Trigger Source for Analog Input #1 (IB) = 0b0100 */
+    ADTRIG0Lbits.TRGSRC1 = 0x4;
 
 }

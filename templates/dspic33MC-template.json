@@ -83,6 +83,46 @@
             "description": "",
             "unit": "",
             "aggregateTypes": []
+        },
+        {
+            "name": "osc_ch",
+            "displayName": "oscChannel",
+            "type": "INTEGER",
+            "description": "Software oscilloscope channel selection: 0=DC bus voltage, 1=measured speed, 2=PWM duty cycle, 3=bus current",
+            "unit": "",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_rate",
+            "displayName": "oscRateUs",
+            "type": "INTEGER",
+            "description": "Software oscilloscope sample period, microseconds",
+            "unit": "us",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_len",
+            "displayName": "oscLength",
+            "type": "INTEGER",
+            "description": "Software oscilloscope capture length, samples",
+            "unit": "",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_t",
+            "displayName": "oscTimeUs",
+            "type": "STRING",
+            "description": "Software oscilloscope capture: elapsed microseconds per sample, as a bracketed array string e.g. \"[0,1000,2000]\" - parsed into numbers on the dashboard side",
+            "unit": "",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_v",
+            "displayName": "oscValue",
+            "type": "STRING",
+            "description": "Software oscilloscope capture: channel value per sample, as a bracketed array string e.g. \"[15230,15228,15235]\" - parsed into numbers on the dashboard side",
+            "unit": "",
+            "aggregateTypes": []
         }
     ],
     "commands": [
@@ -111,6 +151,41 @@
             "name": "Start Motor",
             "command": "motor-start",
             "requiredParam": false,
+            "requiredAck": false,
+            "isOTACommand": false
+        },
+        {
+            "name": "Set Scope Channel",
+            "command": "scope-channel",
+            "requiredParam": true,
+            "requiredAck": false,
+            "isOTACommand": false
+        },
+        {
+            "name": "Set Scope Rate",
+            "command": "scope-rate",
+            "requiredParam": true,
+            "requiredAck": false,
+            "isOTACommand": false
+        },
+        {
+            "name": "Set Scope Length",
+            "command": "scope-length",
+            "requiredParam": true,
+            "requiredAck": false,
+            "isOTACommand": false
+        },
+        {
+            "name": "Start Scope Capture",
+            "command": "scope-capture",
+            "requiredParam": false,
+            "requiredAck": false,
+            "isOTACommand": false
+        },
+        {
+            "name": "TEMP Test Publish Size",
+            "command": "test-pub",
+            "requiredParam": true,
             "requiredAck": false,
             "isOTACommand": false
         }

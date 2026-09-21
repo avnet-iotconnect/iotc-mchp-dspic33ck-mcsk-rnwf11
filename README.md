@@ -292,8 +292,18 @@ every 10 seconds:
 
 (`run` = motor running, `st` = state machine state, `sec` = commutation
 sector, `rpm`/`spd` = requested/measured speed, `ic`/`im` = requested/measured
-current, `duty` = PWM duty cycle, `vdc` = DC bus voltage ADC reading.) Watch
-it arrive on the device's **Live Data** tab in the /IOTCONNECT console.
+current, `duty` = PWM duty cycle, `vdc` = DC bus voltage ADC reading.) Watch it
+arrive on the device's **Live Data** tab in the /IOTCONNECT console.
+
+The current oscilloscope settings publish as their own small message, on the
+same 10-second cadence, right after the message above:
+
+```json
+{"osc_ch": 0, "osc_rate": 500, "osc_len": 50}
+```
+
+They're deliberately a separate publish rather than merged into the message
+above - see [Software Oscilloscope](#software-oscilloscope) below for why.
 
 ### Motor Control Commands
 
@@ -306,6 +316,60 @@ used to toggle the motor power manually.
 | `motor-stop`    | none               | Stops the motor (same effect as pressing SW1 while running)  |
 | `motor-reverse` | none               | Reverses motor direction                        |
 | `motor-speed`   | integer, `0`-`100` | Sets speed as a percent of max RPM (default 50%) |
+
+### Software Oscilloscope
+
+The firmware can capture one motor signal into a buffer at a configurable
+rate and publish it to /IOTCONNECT as two parallel arrays (elapsed time and
+value) - a lightweight, purpose-built alternative to Microchip's X2Cscope
+(which is designed to be driven by its own PC-side tool over a dedicated
+serial link, not by cloud commands - see the design notes in
+`iotconnect/iotconnect_rnwf11.c` above `IOTC_RNWF11_PublishScopeData()` if
+curious). It's a one-shot "single sweep" capture, not a continuous trigger.
+
+| Command          | Parameter           | Effect                                      |
+|------------------|---------------------|----------------------------------------------|
+| `scope-channel`  | integer, `0`-`5`    | Selects the signal to capture: `0`=DC bus voltage (default), `1`=measured speed, `2`=PWM duty cycle, `3`=bus current, `4`=phase A current, `5`=phase B current |
+| `scope-rate`     | integer (µs)        | Sample period in microseconds, rounded to the nearest 50µs (the motor control loop's tick rate); default 500µs (2kHz) |
+| `scope-length`   | integer, `10`-`100` | Number of samples per capture; default 50 (a 25ms window at the default rate) |
+| `scope-capture`  | none                | Starts a new capture using the current channel/rate/length settings |
+
+The default rate/length aren't arbitrary: this motor's `MAX_MOTORSPEED` (4600
+RPM) and `POLEPAIRS` (2) put one electrical revolution at ~6.5ms at max speed
+(~13ms at the 50%-speed boot default) - 500µs/sample resolves each electrical
+cycle's shape (~13-26 samples/cycle) rather than just a Nyquist-minimum
+zigzag, while 50 samples spans several full cycles at any speed the motor
+actually runs at.
+
+Once a capture fills its buffer, the firmware publishes it (independent of
+the normal 10-second telemetry cadence) as:
+
+```json
+{"osc_t": "[0,500,1000,...]", "osc_v": "[15230,15228,15235,...]"}
+```
+
+Both fields are `STRING`-typed attributes carrying a bracketed array of
+numbers as text (not raw JSON arrays - the device template's `OBJECT` type
+doesn't support arrays), meant to be parsed back into numbers on the
+consuming end. `osc_t` is elapsed microseconds since the capture started
+(`osc_rate * sample index`); `osc_v` is the raw value of the selected channel
+at each point, in the same units as that channel's regular telemetry field
+(`vdc`/`spd`/`duty`/`im` respectively - note `im` is currently always 0, see
+the telemetry field notes above).
+
+> [!WARNING]
+> Real hardware testing has now confirmed the RNWF11 has an **undocumented
+> AT command length ceiling somewhere between 158 and 197 bytes** (a routine
+> telemetry publish worked at 158 bytes and failed with `"Invalid Parameter"`
+> once 3 fields were added, growing it to 197 - nothing in the documented
+> `+MQTTC` parameters explains a limit at that size). At the default
+> `scope-length` of 50, a capture's full `AT+MQTTPUB` command is
+> **600+ bytes** - even a 5-sample capture is already ~161 bytes. **The
+> capture-publish feature as currently built is very likely non-functional
+> at any sample count** until this is worked around (most likely by chunking
+> the capture across multiple smaller publishes). Test it, but expect it to
+> fail, and let me know if you'd like help redesigning it around the real
+> limit once we've pinned it down more exactly.
 
 ## 10. Resources
 

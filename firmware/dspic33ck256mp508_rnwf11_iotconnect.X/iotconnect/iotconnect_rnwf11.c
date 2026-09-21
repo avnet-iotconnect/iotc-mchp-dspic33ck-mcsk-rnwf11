@@ -13,6 +13,7 @@
 #include "../hal/device_config.h"
 #include "../hal/nvm_flash.h"
 #include "../motor_commands.h"
+#include "../scope_commands.h"
 #include "provisioning.h"
 
 #define IOTC_RNWF11_RESPONSE_SIZE 384U
@@ -457,6 +458,206 @@ static bool IOTC_RNWF11_PublishTelemetry(void)
     return sent;
 }
 
+/* TEMPORARY diagnostic for the "test-pub" C2D command - bisects the RNWF11's
+ * undocumented AT+MQTTPUB length ceiling (known: 158 bytes worked, 197 bytes
+ * got "Invalid Parameter") by publishing a dummy message padded to a
+ * caller-controlled size, entirely via cloud commands with no rebuild
+ * between attempts. Remove this (and the "test-pub" branch in
+ * IOTC_RNWF11_OnCommand()) once the real limit is known. */
+#define IOTC_RNWF11_TEST_PUB_MAX 1024U
+static bool IOTC_RNWF11_TestPublish(uint16_t fillerLen)
+{
+    if (fillerLen > (IOTC_RNWF11_TEST_PUB_MAX - 1U))
+    {
+        fillerLen = IOTC_RNWF11_TEST_PUB_MAX - 1U;
+    }
+
+    static char fillBuf[IOTC_RNWF11_TEST_PUB_MAX];
+    memset(fillBuf, 'X', fillerLen);
+    fillBuf[fillerLen] = '\0';
+
+    static char payload[IOTC_RNWF11_TEST_PUB_MAX + 32U];
+    int payloadLen = snprintf(payload, sizeof(payload), "{\"d\":[{\"d\":{\"test\":\"%s\"}}]}", fillBuf);
+
+    static char escaped[IOTC_RNWF11_TEST_PUB_MAX + 32U];
+    bool escapedOk = (payloadLen >= 0) && ((size_t)payloadLen < sizeof(payload)) &&
+                      IOTC_RNWF11_EscapeJsonForAtCommand(payload, escaped, sizeof(escaped));
+
+    bool sent = false;
+    int commandLen = -1;
+    if (escapedOk)
+    {
+        static char command[IOTC_RNWF11_TEST_PUB_MAX + 64U];
+        commandLen = snprintf(command, sizeof(command), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
+                               s_cfg.mqtt_pub_topic, escaped);
+        if ((commandLen >= 0) && ((size_t)commandLen < sizeof(command)))
+        {
+            sent = IOTC_RNWF11_Step("MQTTPUB-test", command);
+        }
+    }
+
+    DEBUG_Printf("IOTC: test-pub filler=%u payload=%d full_cmd=%d -> %s\r\n",
+                 (unsigned)fillerLen, payloadLen, commandLen, sent ? "OK" : "FAILED");
+    return sent;
+}
+
+/* Kept as its own small, separate publish rather than folded into
+ * IOTC_RNWF11_PublishTelemetry() above - appending these 3 fields there grew
+ * that single message from 158 to 197 bytes (full AT+MQTTPUB command length)
+ * and broke it outright ("0.4,Invalid Parameter" on real hardware), even
+ * though nothing in the documented +MQTTC parameters (checked: field 9 is
+ * the *subscribe*-side read threshold, field 10 is SERVER_SELECT, neither is
+ * a publish-size limit) explains why - the RNWF11 evidently has some
+ * undocumented AT-line-length ceiling, currently being bisected via the
+ * "test-pub" command (see IOTC_RNWF11_TestPublish(); confirmed OK at 192
+ * bytes, FAILED at 232, as of the last test). This message is also QoS 0
+ * (see below), unlike the QoS 1 main telemetry publish right before it in
+ * the same Task() tick. */
+static bool IOTC_RNWF11_PublishScopeSettings(void)
+{
+    IotclMessageHandle msg = iotcl_telemetry_create();
+    if (msg == NULL)
+    {
+        DEBUG_Printf("IOTC: iotcl_telemetry_create (scope settings) failed\r\n");
+        return false;
+    }
+
+    iotcl_telemetry_set_number(msg, "osc_ch", SCOPE_GetChannel());
+    iotcl_telemetry_set_number(msg, "osc_rate", SCOPE_GetRateMicroseconds());
+    iotcl_telemetry_set_number(msg, "osc_len", SCOPE_GetLength());
+
+    char *json = iotcl_telemetry_create_serialized_string(msg, false);
+    iotcl_telemetry_destroy(msg);
+    if (json == NULL)
+    {
+        DEBUG_Printf("IOTC: iotcl_telemetry_create_serialized_string (scope settings) failed\r\n");
+        return false;
+    }
+
+    char escaped[IOTC_RNWF11_ESCAPED_JSON_MAX];
+    bool escapedOk = IOTC_RNWF11_EscapeJsonForAtCommand(json, escaped, sizeof(escaped));
+
+    bool sent = false;
+    if (!escapedOk)
+    {
+        DEBUG_Printf("IOTC: scope settings JSON too long to escape (%s)\r\n", json);
+    }
+    else
+    {
+        /* QoS 0 (and DUP 0, a fresh message), not QoS 1 like the main
+         * telemetry publish right before this in the same Task() tick: back
+         * to back QoS 1 publishes fail here with "8.0,MQTT Error" on real
+         * hardware, matching a single-in-flight-QoS1-publish limitation -
+         * the module is still waiting on the PUBACK for the first message
+         * when this second AT+MQTTPUB arrives. QoS 0 is fire-and-forget, so
+         * it doesn't contend with that pending ack. */
+        char command[192];
+        int written = snprintf(command, sizeof(command), "AT+MQTTPUB=0,0,0,\"%s\",\"%s\"\r\n",
+                                s_cfg.mqtt_pub_topic, escaped);
+        if ((written < 0) || ((size_t)written >= sizeof(command)))
+        {
+            DEBUG_Printf("IOTC: scope settings command too long to send\r\n");
+        }
+        else
+        {
+            sent = IOTC_RNWF11_Step("MQTTPUB-osc-settings", command);
+        }
+    }
+
+    iotcl_telemetry_destroy_serialized_string(json);
+    return sent;
+}
+
+/* Worst case (100 samples, both arrays, a huge but real achievable time
+ * value at each - see SCOPE_SetRateMicroseconds()'s tick clamp) is roughly
+ * 100 * 2 * ~11 chars/number plus field names/envelope - comfortably under
+ * these, but generously sized (and static, not stack, to avoid adding ~2KB+
+ * to an already-deep call stack) since real RNWF11 AT-line-length headroom
+ * is unverified - see the plan's flagged risk. */
+#define IOTC_RNWF11_SCOPE_JSON_MAX 2048U
+#define IOTC_RNWF11_SCOPE_COMMAND_MAX 2304U
+
+/* Called only from the top level of Task(), never from inside PollEvents() -
+ * same reentrancy reasoning as IOTC_RNWF11_PublishTelemetry(). Builds the
+ * message text by hand (matching the same "{"d":[{"d":{...}}]}" envelope
+ * iotcl_telemetry_create() builds internally - see iotcl_telemetry.c) rather
+ * than via cJSON's tree-building API: iotcl_telemetry_set_number()/_set_string()
+ * have no array support, and building a ~200-node cJSON tree (2 arrays x up
+ * to 100 samples) would cost several KB of per-node heap overhead on top of
+ * cJSON's own growable print buffer - likely more than this project's entire
+ * 4KB app heap (see bldc.X's linker --heap=4096). Hand-formatting into a
+ * fixed static buffer uses no heap at all for this message. */
+static bool IOTC_RNWF11_PublishScopeData(void)
+{
+    uint16_t length = SCOPE_GetLength();
+    uint32_t periodUs = SCOPE_GetRateMicroseconds();
+
+    static char scopeJson[IOTC_RNWF11_SCOPE_JSON_MAX];
+    size_t pos = 0;
+    bool overflow = false;
+
+#define SCOPE_JSON_APPEND(...) \
+    do { \
+        int _w = snprintf(&scopeJson[pos], sizeof(scopeJson) - pos, __VA_ARGS__); \
+        if ((_w < 0) || ((size_t)_w >= (sizeof(scopeJson) - pos))) { overflow = true; } \
+        else { pos += (size_t)_w; } \
+    } while (0)
+
+    /* osc_t/osc_v are STRING-typed attributes in the device template (the
+     * template's OBJECT type doesn't support arrays) - the dashboard parses
+     * the bracketed array text back into numbers on its own end, so each one
+     * is a JSON string *containing* "[...]", not a bare JSON array value. */
+    SCOPE_JSON_APPEND("{\"d\":[{\"d\":{\"osc_t\":\"[");
+    for (uint16_t i = 0; (i < length) && !overflow; i++)
+    {
+        SCOPE_JSON_APPEND("%s%lu", (i == 0) ? "" : ",", (unsigned long)((uint32_t)i * periodUs));
+    }
+    SCOPE_JSON_APPEND("]\",\"osc_v\":\"[");
+    for (uint16_t i = 0; (i < length) && !overflow; i++)
+    {
+        SCOPE_JSON_APPEND("%s%d", (i == 0) ? "" : ",", (int)SCOPE_GetSample(i));
+    }
+    SCOPE_JSON_APPEND("]\"}}]}");
+#undef SCOPE_JSON_APPEND
+
+    if (overflow)
+    {
+        DEBUG_Printf("IOTC: scope JSON too long to build (%u samples)\r\n", (unsigned)length);
+        return false;
+    }
+
+    /* This payload is 100% digits/brackets/commas plus the fixed key-name
+     * quotes above - escaping only ever affects those few literal quotes,
+     * never the array contents, but reuse the shared escaper anyway for the
+     * same correctness reasons every other publish path does. */
+    static char scopeEscaped[IOTC_RNWF11_SCOPE_JSON_MAX];
+    bool escapedOk = IOTC_RNWF11_EscapeJsonForAtCommand(scopeJson, scopeEscaped, sizeof(scopeEscaped));
+
+    bool sent = false;
+    if (!escapedOk)
+    {
+        DEBUG_Printf("IOTC: scope JSON too long to escape (%u samples)\r\n", (unsigned)length);
+    }
+    else
+    {
+        static char scopeCommand[IOTC_RNWF11_SCOPE_COMMAND_MAX];
+        int written = snprintf(scopeCommand, sizeof(scopeCommand), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
+                                s_cfg.mqtt_pub_topic, scopeEscaped);
+        if ((written < 0) || ((size_t)written >= sizeof(scopeCommand)))
+        {
+            DEBUG_Printf("IOTC: scope command too long to send (%u samples)\r\n", (unsigned)length);
+        }
+        else
+        {
+            sent = IOTC_RNWF11_Step("MQTTPUB-scope", scopeCommand);
+        }
+    }
+
+    DEBUG_Printf("IOTC: scope publish %s (%u samples, %lu us/sample)\r\n",
+                 sent ? "ok" : "FAILED", (unsigned)length, (unsigned long)periodUs);
+    return sent;
+}
+
 /* Only ever called from the top level of Task()/OnCommand(), never from
  * inside PollEvents() - see the "+MQTTSUBRX:" handling note above. */
 static void IOTC_RNWF11_SendCmdAck(const char *ack_id, int status, const char *message)
@@ -558,6 +759,74 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
                 percent = 100;
             }
             MCAPP_MotorSetSpeedPercent((uint8_t)percent);
+        }
+    }
+    else if (strcmp(command, "scope-channel") == 0)
+    {
+        char *endptr = NULL;
+        long channel = (arg != NULL) ? strtol(arg, &endptr, 10) : -1;
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (channel < 0) || (channel > SCOPE_CHANNEL_MAX))
+        {
+            status = IOTCL_C2D_EVT_CMD_FAILED;
+            message = "scope-channel requires an integer 0-5 (0=vdc,1=speed,2=duty,3=ibus,4=ia,5=ib)";
+        }
+        else
+        {
+            SCOPE_SetChannel((uint8_t)channel);
+        }
+    }
+    else if (strcmp(command, "scope-rate") == 0)
+    {
+        char *endptr = NULL;
+        long microseconds = (arg != NULL) ? strtol(arg, &endptr, 10) : 0;
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (microseconds < 1))
+        {
+            status = IOTCL_C2D_EVT_CMD_FAILED;
+            message = "scope-rate requires a positive integer (microseconds)";
+        }
+        else
+        {
+            SCOPE_SetRateMicroseconds((uint32_t)microseconds);
+        }
+    }
+    else if (strcmp(command, "scope-length") == 0)
+    {
+        char *endptr = NULL;
+        long samples = (arg != NULL) ? strtol(arg, &endptr, 10) : 0;
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (samples < 1))
+        {
+            status = IOTCL_C2D_EVT_CMD_FAILED;
+            message = "scope-length requires a positive integer (samples, clamped to 10-100)";
+        }
+        else
+        {
+            /* Clamp before the uint16_t cast below, same reasoning as
+             * motor-speed's clamp-before-cast above - an out-of-range value
+             * (e.g. 70000) would otherwise wrap modulo 65536. */
+            if (samples > SCOPE_BUFFER_MAX)
+            {
+                samples = SCOPE_BUFFER_MAX;
+            }
+            SCOPE_SetLength((uint16_t)samples);
+        }
+    }
+    else if (strcmp(command, "scope-capture") == 0)
+    {
+        SCOPE_StartCapture();
+    }
+    else if (strcmp(command, "test-pub") == 0)
+    {
+        /* TEMPORARY - see IOTC_RNWF11_TestPublish()'s comment. */
+        char *endptr = NULL;
+        long fillerLen = (arg != NULL) ? strtol(arg, &endptr, 10) : -1;
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (fillerLen < 0) || (fillerLen > (long)IOTC_RNWF11_TEST_PUB_MAX))
+        {
+            status = IOTCL_C2D_EVT_CMD_FAILED;
+            message = "test-pub requires an integer filler length (see debug console for result)";
+        }
+        else
+        {
+            (void)IOTC_RNWF11_TestPublish((uint16_t)fillerLen);
         }
     }
     else
@@ -796,6 +1065,11 @@ void IOTC_RNWF11_Task(void)
         DEBUG_Printf("IOTC: C2D message (%u bytes): %s\r\n", (unsigned)pendingC2dPayloadLen, pendingC2dPayload);
         (void)iotcl_mqtt_receive_c2d_with_length((const uint8_t *)pendingC2dPayload, pendingC2dPayloadLen);
     }
+    if (SCOPE_IsReady())
+    {
+        (void)IOTC_RNWF11_PublishScopeData();
+        SCOPE_ClearReady();
+    }
     if (telemetryMilliseconds >= IOTC_TELEMETRY_PERIOD_MS)
     {
         telemetryMilliseconds = 0;
@@ -810,6 +1084,9 @@ void IOTC_RNWF11_Task(void)
         DEBUG_Printf("IOTC: publish %s state=%u rpm=%u duty=%d\r\n",
                  sent ? "ok" : "FAILED",
                  telemetry.state, telemetry.measuredSpeedRpm, telemetry.dutyCycle);
+
+        bool oscSent = IOTC_RNWF11_PublishScopeSettings();
+        DEBUG_Printf("IOTC: publish scope settings %s\r\n", oscSent ? "ok" : "FAILED");
     }
 #endif
 }

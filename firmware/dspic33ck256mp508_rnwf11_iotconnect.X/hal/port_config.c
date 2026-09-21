@@ -162,26 +162,54 @@ void SetupGPIOPorts(void)
 
 void MapGPIOHWFunction(void)
 {
-    /* ANALOG SIGNALS */       
+    /* ANALOG SIGNALS */
     //IBUS
     //Ibus Out
     ANSELAbits.ANSELA4 = 1;
     TRISAbits.TRISA4 = 1;   //OA3OUT/AN4/CMP3B/IBIAS3/RA4
-    
+
+    // Phase A current (IA) output - OA1OUT/AN0, dedicated ADC Core #0.
+    // Per the LVMC board user's guide Table 2-14: pin 16, OA1OUT/AN0/CMP1A/IBIAS0/RA0.
+    ANSELAbits.ANSELA0 = 1;
+    TRISAbits.TRISA0 = 1;   //OA1OUT/AN0/CMP1A/IBIAS0/RA0
+
+    // Phase B current (IB) output - OA2OUT/AN1, dedicated ADC Core #1.
+    // Per the LVMC board user's guide Table 2-14: pin 41, OA2OUT/AN1/.../RB2.
+    ANSELBbits.ANSELB2 = 1;
+    TRISBbits.TRISB2 = 1;   //OA2OUT/AN1/AN7/ANA0/CMP1D/CMP2D/CMP3D/RP34/SCL3/INT0/RB2
+
     #ifdef INTERNAL_OPAMP_CONFIG
-        //Ibus- 
+        //Ibus-
     ANSELCbits.ANSELC1 = 1;
     TRISCbits.TRISC1 = 1;   //Pin:28 OA3IN-/AN13/CMP1B/ISRC0/RP49/PMA7/RC1
-    
-    //Ibus+ 
+
+    //Ibus+
     ANSELCbits.ANSELC2 = 1;
     TRISCbits.TRISC2 = 1;   //Pin 29 :OA3IN+/AN14/CMP2B/ISRC1/RP50/PMD13/PMA13/RC2
-    
+
     AMPCON1Hbits.NCHDIS3 = 0;    //Wide input range for Op Amp #3
     AMPCON1Lbits.AMPEN3 = 1;     //Enables Op Amp #3
-    
+
+    // Phase A shunt differential inputs (OA1) - pin 18/20 per Table 2-14.
+    ANSELAbits.ANSELA1 = 1;
+    TRISAbits.TRISA1 = 1;   //Pin 18: OA1IN-/ANA1/RA1
+    ANSELAbits.ANSELA2 = 1;
+    TRISAbits.TRISA2 = 1;   //Pin 20: OA1IN+/AN9/PMA6/RA2
+
+    AMPCON1Hbits.NCHDIS1 = 0;    //Wide input range for Op Amp #1
+    AMPCON1Lbits.AMPEN1 = 1;     //Enables Op Amp #1 (Phase A current)
+
+    // Phase B shunt differential inputs (OA2) - pin 43/45 per Table 2-14.
+    ANSELBbits.ANSELB3 = 1;
+    TRISBbits.TRISB3 = 1;   //Pin 43: PGD2/OA2IN-/AN8/RP35/RB3
+    ANSELBbits.ANSELB4 = 1;
+    TRISBbits.TRISB4 = 1;   //Pin 45: PGC2/OA2IN+/RP36/RB4
+
+    AMPCON1Hbits.NCHDIS2 = 0;    //Wide input range for Op Amp #2
+    AMPCON1Lbits.AMPEN2 = 1;     //Enables Op Amp #2 (Phase B current)
+
     AMPCON1Lbits.AMPON = 1;      //Enables op amp modules if their respective AMPENx bits are also asserted
-     
+
     #endif
     // Potentiometer  input - used as Speed Reference
     // POT1 
