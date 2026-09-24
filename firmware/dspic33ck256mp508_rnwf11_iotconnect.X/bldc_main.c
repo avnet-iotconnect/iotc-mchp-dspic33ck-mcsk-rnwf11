@@ -73,7 +73,10 @@
 // MCAPP_INIT (re-entered on every stop cycle) deliberately does not touch it,
 // so a speed set via MCAPP_MotorSetSpeedPercent() still holds across a
 // motor-stop/motor-start cycle, per its documented behavior.
-MCAPP_DATA_T     mcappData = { .desiredSpeed = (MAX_MOTORSPEED * 50) / 100 };
+// The multiply must be done in 32 bits: int is 16 bits on the dsPIC, so a plain
+// (MAX_MOTORSPEED * 50) overflows (230000 wraps to -32144, giving a default of
+// -321 RPM - i.e. 65215 in the unsigned field - and a stalled speed loop).
+MCAPP_DATA_T     mcappData = { .desiredSpeed = (uint16_t)(((uint32_t)MAX_MOTORSPEED * 50UL) / 100UL) };
 /******************************************************************************
  * Description: The main function initialises the microcontroller port configurations
  *              and settings. It is the main program which also reads the button 
@@ -105,24 +108,15 @@ int main(void)
         .dutyCycle = mcappData.dutyCycle,
         .dcBusAdc = mcappData.analogInputs.measureVdc.value
     };
-        HAL_BoardService();
-
         // SW1 stays live as a manual on/off override - e.g. to stop the motor
-        // by hand if the internet connection drops. SW2 (reverse) and the
-        // potentiometer (speed) are intentionally not read: those are cloud-only,
-        // driven by /IOTCONNECT C2D commands (see MCAPP_Motor* in this file and
-        // IOTC_RNWF11_OnCommand() in iotconnect/iotconnect_rnwf11.c).
-        if(HAL_IsPressed_Button1())
-        {
-            if(mcappData.runCmd == 0)
-            {
-                MCAPP_MotorStart();
-            }
-            else
-            {
-                MCAPP_MotorStop();
-            }
-        }
+        // by hand if the internet connection drops - but it is handled in the
+        // ADC interrupt (MCAPP_ButtonTick), not here: the calls below block for
+        // long stretches (Wi-Fi/MQTT connect waits, scope publishing), and a
+        // button polled from this loop is simply not seen while they run. SW2
+        // (reverse) and the potentiometer (speed) are intentionally not read:
+        // those are cloud-only, driven by /IOTCONNECT C2D commands (see
+        // MCAPP_Motor* in this file and IOTC_RNWF11_OnCommand() in
+        // iotconnect/iotconnect_rnwf11.c).
         IOTC_RNWF11_SetTelemetry(&telemetry);
         IOTC_RNWF11_CheckProvisioning();
         IOTC_RNWF11_Task();
@@ -330,9 +324,6 @@ static void SCOPE_Tick(void)
     int16_t value;
     switch (scopeChannel)
     {
-        case SCOPE_CHANNEL_SPEED:
-            value = mcappData.calculateSpeed.speedValue;
-            break;
         case SCOPE_CHANNEL_DUTY:
             value = mcappData.dutyCycle;
             break;
@@ -362,6 +353,50 @@ static void SCOPE_Tick(void)
  *              the potentiometer voltage, Bus Current are read. It services
  *              the MCAPP_StateMachine routine as well.
  *****************************************************************************/
+/******************************************************************************
+ * Description: SW1 start/stop override, run from the ADC interrupt so it keeps
+ *              working no matter what the main loop is blocked on. Same
+ *              behavior as the stock HAL_BoardService() scan it replaces: SW1
+ *              is active-low (pulled up on the board, closes to ground), and a
+ *              press is accepted once the button has been released for at least
+ *              BUTTON_DEBOUNCE_COUNT ms beforehand, so contact bounce and a
+ *              button held down at power-up are ignored. A press toggles the
+ *              motor: it stops a running motor, or starts a stopped one.
+ *****************************************************************************/
+static void MCAPP_ButtonTick(void)
+{
+    static uint8_t divider;
+    static uint8_t releasedMs;
+
+    if (++divider < BOARD_SERVICE_TICK_COUNT) // every 20 ticks = 1 ms
+    {
+        return;
+    }
+    divider = 0;
+
+    if (SW1)
+    {
+        if (releasedMs < BUTTON_DEBOUNCE_COUNT)
+        {
+            releasedMs++;
+        }
+    }
+    else
+    {
+        if (releasedMs >= BUTTON_DEBOUNCE_COUNT)
+        {
+            if (mcappData.runCmd == 0)
+            {
+                MCAPP_MotorStart();
+            }
+            else
+            {
+                MCAPP_MotorStop();
+            }
+        }
+        releasedMs = 0;
+    }
+}
 void __attribute__((__interrupt__,no_auto_psv)) HAL_MC1ADCInterrupt()
 {
     static uint8_t iotcTickDivider;
@@ -372,12 +407,13 @@ void __attribute__((__interrupt__,no_auto_psv)) HAL_MC1ADCInterrupt()
     }
 /**  Routine to read the potentiometer value and the bus current value */
     HAL_MC1MotorInputsRead(&mcappData.analogInputs);
+/**  SW1 manual start/stop override (before the state machine so a stop acts this tick) */
+    MCAPP_ButtonTick();
 /**  Routine to run the Motor Control State Machine */
     MCAPP_StateMachine();
 /**  Software oscilloscope sample point - see scope_commands.h */
     SCOPE_Tick();
 
-    HAL_BoardServiceStepIsr();
     HAL_MC1ADCInterruptFlagClear();
 }
 /******************************************************************************

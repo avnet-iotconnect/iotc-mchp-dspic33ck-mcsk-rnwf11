@@ -88,7 +88,7 @@
             "name": "osc_ch",
             "displayName": "oscChannel",
             "type": "INTEGER",
-            "description": "Software oscilloscope channel selection: 0=DC bus voltage, 1=measured speed, 2=PWM duty cycle, 3=bus current",
+            "description": "Software oscilloscope channel selection: 0=DC bus voltage, 1=PWM duty cycle, 2=bus current, 3=phase A current, 4=phase B current",
             "unit": "",
             "aggregateTypes": []
         },
@@ -121,6 +121,22 @@
             "displayName": "oscValue",
             "type": "STRING",
             "description": "Software oscilloscope capture: channel value per sample, as a bracketed array string e.g. \"[15230,15228,15235]\" - parsed into numbers on the dashboard side",
+            "unit": "",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_seq",
+            "displayName": "oscChunkSeq",
+            "type": "INTEGER",
+            "description": "Software oscilloscope capture: 1-based index of this chunk. A capture is published as osc_n chunks, each carrying a slice of the osc_t/osc_v arrays; concatenate them in osc_seq order",
+            "unit": "",
+            "aggregateTypes": []
+        },
+        {
+            "name": "osc_n",
+            "displayName": "oscChunkCount",
+            "type": "INTEGER",
+            "description": "Software oscilloscope capture: total number of chunks in this capture. The capture is complete once osc_seq equals osc_n",
             "unit": "",
             "aggregateTypes": []
         }
@@ -179,13 +195,6 @@
             "name": "Start Scope Capture",
             "command": "scope-capture",
             "requiredParam": false,
-            "requiredAck": false,
-            "isOTACommand": false
-        },
-        {
-            "name": "TEMP Test Publish Size",
-            "command": "test-pub",
-            "requiredParam": true,
             "requiredAck": false,
             "isOTACommand": false
         }

@@ -294,8 +294,13 @@ void HAL_MC1PWMSetDutyCyclesIdentical(int16_t dutyCycle)
 void HAL_MC1MotorInputsRead(MCAPP_MEASURE_T *pMotorInputs)
 {   
     pMotorInputs->measureCurrent.Ibus = (int16_t)(ADCBUF_IBUS);
-    pMotorInputs->measureCurrent.Ia = (int16_t)(ADCBUF_IA);
-    pMotorInputs->measureCurrent.Ib = (int16_t)(ADCBUF_IB);
+    /* AN0/AN1 (phase A/B) are configured as unsigned ADC data (ADMOD0L SIGN0/SIGN1
+     * are 0, unlike AN4/IBUS which sets SIGN4), so zero current sits at mid-scale
+     * (~0x8000 = the 1.65V VREF the op-amps bias to) and a plain (int16_t) cast would
+     * wrap any positive current to a large negative value. Subtracting mid-scale
+     * gives the same signed, zero-centred format as Ibus. */
+    pMotorInputs->measureCurrent.Ia = (int16_t)(ADCBUF_IA - 0x8000U);
+    pMotorInputs->measureCurrent.Ib = (int16_t)(ADCBUF_IB - 0x8000U);
     pMotorInputs->measurePot = (int16_t)(ADCBUF_POT >>1);
     pMotorInputs->measureVdc.value = (int16_t)(ADCBUF_VBUS >>1);
 }

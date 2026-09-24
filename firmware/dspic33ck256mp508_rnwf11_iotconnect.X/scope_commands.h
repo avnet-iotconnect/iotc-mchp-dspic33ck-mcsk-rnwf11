@@ -15,15 +15,17 @@ extern "C" {
 // motor_commands.h: including bldc_main.h from a second translation unit
 // would duplicate its file-scope PWM_STATE* array definitions.
 
-#define SCOPE_BUFFER_MAX 100U
+#define SCOPE_BUFFER_MAX 1000U
 
 // Channel indices for SCOPE_SetChannel()/SCOPE_GetChannel().
 #define SCOPE_CHANNEL_VDC    0U // DC bus voltage, raw ADC (default)
-#define SCOPE_CHANNEL_SPEED  1U // measured speed, RPM
-#define SCOPE_CHANNEL_DUTY   2U // PWM duty cycle, raw compare count
-#define SCOPE_CHANNEL_IBUS   3U // bus current, raw ADC
-#define SCOPE_CHANNEL_IA     4U // phase A current (Op Amp 1 / AN0), raw ADC
-#define SCOPE_CHANNEL_IB     5U // phase B current (Op Amp 2 / AN1), raw ADC
+#define SCOPE_CHANNEL_DUTY   1U // PWM duty cycle, raw compare count
+#define SCOPE_CHANNEL_IBUS   2U // bus current, raw ADC
+#define SCOPE_CHANNEL_IA     3U // phase A current (Op Amp 1 / AN0), raw ADC
+#define SCOPE_CHANNEL_IB     4U // phase B current (Op Amp 2 / AN1), raw ADC
+// Measured speed is deliberately not a channel: it only updates once per
+// electrical revolution (hall interrupt), too slow to be worth scoping - it's
+// already in the regular telemetry as "spd".
 #define SCOPE_CHANNEL_MAX    SCOPE_CHANNEL_IB
 
 void SCOPE_SetChannel(uint8_t channel);       // clamps to 0-SCOPE_CHANNEL_MAX (SCOPE_CHANNEL_*)

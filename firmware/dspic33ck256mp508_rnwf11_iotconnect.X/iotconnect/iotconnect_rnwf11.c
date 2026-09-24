@@ -33,20 +33,36 @@ static bool mqttLinkUp;
  * re-announces its IP on a fresh association. */
 static bool netUp = true;
 
-/* Set by PollEvents() when an unsolicited "+MQTTSUBRX:" line carries a C2D
- * message; consumed by Task(), never from inside PollEvents() itself - see
- * the "+MQTTSUBRX:" handling note there. The module inlines the payload
- * directly in that line for messages under its read threshold (AT+MQTTC=9,
- * 128 bytes by default), which every C2D command this firmware supports is
- * well under. A payload at or above that threshold is not handled (per
- * Microchip's Appendix A.5, AT+MQTTSUBRD would be needed instead, but that
- * path is unverified against real hardware and unnecessary for our short
- * commands). */
+/* Incoming C2D messages (unsolicited "+MQTTSUBRX:" lines) are queued here by
+ * PollEvents() and acted on later by Task(), never from inside PollEvents()
+ * itself - see the "+MQTTSUBRX:" handling note in IOTC_RNWF11_HandleEventLine().
+ * A queue rather than a single slot because Task() deliberately holds commands
+ * back while a scope capture is being published (which can take many seconds
+ * for a long capture), and more than one can arrive in that time. The module
+ * inlines the payload directly in that line for messages under its read
+ * threshold (AT+MQTTC=9, 128 bytes by default), which every C2D command this
+ * firmware supports is well under. A payload at or above that threshold is not
+ * handled (per Microchip's Appendix A.5, AT+MQTTSUBRD would be needed instead,
+ * but that path is unverified against real hardware and unnecessary for our
+ * short commands). */
 #define IOTC_RNWF11_C2D_TOPIC_MAX 128U
 #define IOTC_RNWF11_C2D_PAYLOAD_MAX 256U
-static bool pendingC2dMessage;
-static char pendingC2dPayload[IOTC_RNWF11_C2D_PAYLOAD_MAX];
-static size_t pendingC2dPayloadLen;
+#define IOTC_RNWF11_C2D_QUEUE_LEN 4U
+static char c2dQueue[IOTC_RNWF11_C2D_QUEUE_LEN][IOTC_RNWF11_C2D_PAYLOAD_MAX];
+static size_t c2dQueueLen[IOTC_RNWF11_C2D_QUEUE_LEN];
+static uint8_t c2dQueueHead;
+static uint8_t c2dQueueCount;
+
+/* Free-running millisecond clock, driven from the ADC interrupt (see
+ * IOTC_RNWF11_Tick1ms()) - unlike telemetryMilliseconds it is never reset. */
+static volatile uint32_t msNow;
+
+/* True from a QoS 1 AT+MQTTPUB being sent until its "+MQTTPUBACK" event is
+ * seen in PollEvents(). The module rejects a second AT+MQTTPUB ("8.0,MQTT
+ * Error") while one is still awaiting its ack - see IOTC_RNWF11_PublishStep().
+ * pubAckSentMs is msNow when that publish went out. */
+static volatile bool mqttPubAckPending;
+static uint32_t pubAckSentMs;
 
 /* Populated at boot from flash (see IOTC_RNWF11_Initialize()) if the
  * device has been provisioned via tools/provision_device_config.py/.ps1,
@@ -105,13 +121,66 @@ static void IOTC_RNWF11_Write(const char *text)
     }
 }
 
+/* msNow is 32 bits on a 16-bit CPU and written from an interrupt, so re-read
+ * until two reads agree rather than risk a torn value. */
+static uint32_t IOTC_RNWF11_Now(void)
+{
+    uint32_t a;
+    uint32_t b;
+    do
+    {
+        a = msNow;
+        b = msNow;
+    } while (a != b);
+    return a;
+}
+
 static void IOTC_RNWF11_PollEvents(void);
+static void IOTC_RNWF11_HandleEventLine(const char *line);
 static void IOTC_RNWF11_OnCommand(IotclC2dEventData data);
 static void IOTC_RNWF11_SendCmdAck(const char *ack_id, int status, const char *message);
+
+/* Everything the module sends while we wait for an AT command's reply is
+ * gathered into lastResponse by IOTC_RNWF11_Collect(), not parsed a line at a
+ * time by PollEvents() - so a C2D message or publish ack that happens to land in
+ * that window would otherwise be lost. Hand any such lines to the normal event
+ * handler. Only these two kinds: the connection-state events (+WSTA*,
+ * +MQTTCONN*) are deliberately left as they were, since Configure()'s flow was
+ * tuned around them not being seen here. (A message arriving while the command
+ * itself is still being transmitted is still lost - the module echoes the
+ * command back and IOTC_RNWF11_Write() discards everything it reads then.) */
+static void IOTC_RNWF11_RecoverSwallowedEvents(void)
+{
+    static char line[128];
+    const char *p = lastResponse;
+
+    while (*p != '\0')
+    {
+        const char *end = p;
+        while ((*end != '\0') && (*end != '\r') && (*end != '\n'))
+        {
+            end++;
+        }
+        size_t n = (size_t)(end - p);
+        if ((n > 0U) && (n < sizeof(line)) &&
+            ((strncmp(p, "+MQTTSUBRX:", 11) == 0) || (strncmp(p, "+MQTTPUBACK", 11) == 0)))
+        {
+            memcpy(line, p, n);
+            line[n] = '\0';
+            IOTC_RNWF11_HandleEventLine(line);
+        }
+        p = end;
+        while ((*p == '\r') || (*p == '\n'))
+        {
+            p++;
+        }
+    }
+}
 
 static bool IOTC_RNWF11_CommandWithTimeout(const char *command, uint32_t timeout)
 {
     uint16_t length = 0;
+    bool ok = false;
 
     /* Print anything pending rather than discarding a failure notification. */
     IOTC_RNWF11_PollEvents();
@@ -132,14 +201,16 @@ static bool IOTC_RNWF11_CommandWithTimeout(const char *command, uint32_t timeout
         }
         if (strstr(lastResponse, "ERROR") != NULL)
         {
-            return false;
+            break;
         }
         if (strstr(lastResponse, "OK") != NULL)
         {
-            return true;
+            ok = true;
+            break;
         }
     }
-    return false;
+    IOTC_RNWF11_RecoverSwallowedEvents();
+    return ok;
 }
 
 static bool IOTC_RNWF11_Command(const char *command)
@@ -235,6 +306,18 @@ static bool IOTC_RNWF11_WaitForNetwork(void)
     return false;
 }
 
+/* Subscriptions don't survive a fresh MQTTCONN (clean session), so this
+ * has to be redone on every (re)connect, not just once at boot. */
+static void IOTC_RNWF11_Subscribe(void)
+{
+    if (s_cfg.mqtt_c2d_topic[0] != '\0')
+    {
+        char command[192];
+        snprintf(command, sizeof(command), "AT+MQTTSUB=\"%s\",1\r\n", s_cfg.mqtt_c2d_topic);
+        (void)IOTC_RNWF11_Step("MQTTSUB", command);
+    }
+}
+
 static bool IOTC_RNWF11_Configure(void)
 {
     char command[256];
@@ -318,25 +401,24 @@ static bool IOTC_RNWF11_Configure(void)
         return false;
     }
 
-    /* The broker result arrives asynchronously; watch for it rather than guess. */
-    for (uint16_t slice = 0; slice < 10000U; slice++)
+    /* The broker result arrives asynchronously; watch for it rather than
+     * guess. The TLS handshake to AWS was seen taking well over 5 seconds
+     * (the +MQTTCONN:1 landed just after the old 5s window closed, the
+     * attempt was declared failed, and the retry then tore that good session
+     * down - repeatedly). ~20s here; Task() also adopts a session that comes
+     * up even later than that. */
+    for (uint16_t slice = 0; (slice < 40000U) && !mqttLinkUp; slice++)
     {
         __delay_us(500);
         IOTC_RNWF11_PollEvents();
-        if (mqttLinkUp)
-        {
-            break;
-        }
     }
-
-    /* Subscriptions don't survive a fresh MQTTCONN (clean session), so this
-     * has to be redone on every (re)connect, not just once at boot. */
-    if (mqttLinkUp && (s_cfg.mqtt_c2d_topic[0] != '\0'))
+    if (!mqttLinkUp)
     {
-        snprintf(command, sizeof(command), "AT+MQTTSUB=\"%s\",1\r\n", s_cfg.mqtt_c2d_topic);
-        (void)IOTC_RNWF11_Step("MQTTSUB", command);
+        DEBUG_Printf("IOTC: step MQTT-connect-wait timed out (no +MQTTCONN:1)\r\n");
+        return false;
     }
 
+    IOTC_RNWF11_Subscribe();
     return mqttLinkUp;
 }
 
@@ -368,7 +450,7 @@ static bool IOTC_RNWF11_EscapeJsonForAtCommand(const char *json, char *out, size
 
 /* Inverse of IOTC_RNWF11_EscapeJsonForAtCommand() - the module applies the
  * same backslash-quote escaping to inbound quoted string fields (seen in
- * "+MQTTSUBRX:" - see the pendingC2dPayload comment above) as we apply to
+ * "+MQTTSUBRX:" - see the c2dQueue comment above) as we apply to
  * outbound ones. Copies src into dst, un-escaping as it goes, stopping at
  * the first unescaped '"'. Returns a pointer just past that closing quote,
  * or NULL if src ends before an unescaped '"' is found. *out_len is set to
@@ -402,6 +484,47 @@ static const char *IOTC_RNWF11_UnescapeQuotedString(const char *src, char *dst, 
         src++;
     }
     return NULL;
+}
+
+#define IOTC_RNWF11_PUBACK_WAIT_MS 2000U
+
+/* Every AT+MQTTPUB goes through here. Confirmed on real hardware: a publish
+ * sent while the previous one's "+MQTTPUBACK" is still outstanding fails with
+ * "8.0,MQTT Error", regardless of QoS or size (the ack arrives just after the
+ * failure). So wait for the outstanding ack first, and remember when this
+ * publish will produce one (QoS 1 - the second field of the command). Gives
+ * up waiting after IOTC_RNWF11_PUBACK_WAIT_MS rather than wedging if an ack is
+ * lost. Only call from the top level of Task()/OnCommand(), like the Step()
+ * calls it wraps. */
+static bool IOTC_RNWF11_PublishStep(const char *label, const char *command, bool expectAck)
+{
+    if (mqttPubAckPending)
+    {
+        while (mqttPubAckPending && ((uint32_t)(IOTC_RNWF11_Now() - pubAckSentMs) < IOTC_RNWF11_PUBACK_WAIT_MS))
+        {
+            IOTC_RNWF11_PollEvents();
+            __delay_ms(1);
+        }
+        DEBUG_Printf("IOTC: %s: waited %lu ms for PUBACK%s\r\n", label,
+                     (unsigned long)(IOTC_RNWF11_Now() - pubAckSentMs),
+                     mqttPubAckPending ? " (never came, sending anyway)" : "");
+        mqttPubAckPending = false;
+    }
+
+    /* Set before sending, not after: the ack can be picked up while the send
+     * itself is still being processed (see IOTC_RNWF11_RecoverSwallowedEvents()),
+     * and setting the flag afterwards would then wait for an ack already seen. */
+    if (expectAck)
+    {
+        pubAckSentMs = IOTC_RNWF11_Now();
+        mqttPubAckPending = true;
+    }
+    bool sent = IOTC_RNWF11_Step(label, command);
+    if (!sent)
+    {
+        mqttPubAckPending = false;
+    }
+    return sent;
 }
 
 static bool IOTC_RNWF11_PublishTelemetry(void)
@@ -450,7 +573,7 @@ static bool IOTC_RNWF11_PublishTelemetry(void)
         }
         else
         {
-            sent = IOTC_RNWF11_Step("MQTTPUB", command);
+            sent = IOTC_RNWF11_PublishStep("MQTTPUB", command, true);
         }
     }
 
@@ -458,61 +581,10 @@ static bool IOTC_RNWF11_PublishTelemetry(void)
     return sent;
 }
 
-/* TEMPORARY diagnostic for the "test-pub" C2D command - bisects the RNWF11's
- * undocumented AT+MQTTPUB length ceiling (known: 158 bytes worked, 197 bytes
- * got "Invalid Parameter") by publishing a dummy message padded to a
- * caller-controlled size, entirely via cloud commands with no rebuild
- * between attempts. Remove this (and the "test-pub" branch in
- * IOTC_RNWF11_OnCommand()) once the real limit is known. */
-#define IOTC_RNWF11_TEST_PUB_MAX 1024U
-static bool IOTC_RNWF11_TestPublish(uint16_t fillerLen)
-{
-    if (fillerLen > (IOTC_RNWF11_TEST_PUB_MAX - 1U))
-    {
-        fillerLen = IOTC_RNWF11_TEST_PUB_MAX - 1U;
-    }
-
-    static char fillBuf[IOTC_RNWF11_TEST_PUB_MAX];
-    memset(fillBuf, 'X', fillerLen);
-    fillBuf[fillerLen] = '\0';
-
-    static char payload[IOTC_RNWF11_TEST_PUB_MAX + 32U];
-    int payloadLen = snprintf(payload, sizeof(payload), "{\"d\":[{\"d\":{\"test\":\"%s\"}}]}", fillBuf);
-
-    static char escaped[IOTC_RNWF11_TEST_PUB_MAX + 32U];
-    bool escapedOk = (payloadLen >= 0) && ((size_t)payloadLen < sizeof(payload)) &&
-                      IOTC_RNWF11_EscapeJsonForAtCommand(payload, escaped, sizeof(escaped));
-
-    bool sent = false;
-    int commandLen = -1;
-    if (escapedOk)
-    {
-        static char command[IOTC_RNWF11_TEST_PUB_MAX + 64U];
-        commandLen = snprintf(command, sizeof(command), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
-                               s_cfg.mqtt_pub_topic, escaped);
-        if ((commandLen >= 0) && ((size_t)commandLen < sizeof(command)))
-        {
-            sent = IOTC_RNWF11_Step("MQTTPUB-test", command);
-        }
-    }
-
-    DEBUG_Printf("IOTC: test-pub filler=%u payload=%d full_cmd=%d -> %s\r\n",
-                 (unsigned)fillerLen, payloadLen, commandLen, sent ? "OK" : "FAILED");
-    return sent;
-}
-
 /* Kept as its own small, separate publish rather than folded into
- * IOTC_RNWF11_PublishTelemetry() above - appending these 3 fields there grew
- * that single message from 158 to 197 bytes (full AT+MQTTPUB command length)
- * and broke it outright ("0.4,Invalid Parameter" on real hardware), even
- * though nothing in the documented +MQTTC parameters (checked: field 9 is
- * the *subscribe*-side read threshold, field 10 is SERVER_SELECT, neither is
- * a publish-size limit) explains why - the RNWF11 evidently has some
- * undocumented AT-line-length ceiling, currently being bisected via the
- * "test-pub" command (see IOTC_RNWF11_TestPublish(); confirmed OK at 192
- * bytes, FAILED at 232, as of the last test). This message is also QoS 0
- * (see below), unlike the QoS 1 main telemetry publish right before it in
- * the same Task() tick. */
+ * IOTC_RNWF11_PublishTelemetry() above: the RNWF11 rejects any AT+MQTTPUB
+ * command line over 195 bytes ("0.4,Invalid Parameter"), and appending these
+ * 3 fields to the main message pushed it from 158 to 197. */
 static bool IOTC_RNWF11_PublishScopeSettings(void)
 {
     IotclMessageHandle msg = iotcl_telemetry_create();
@@ -544,15 +616,11 @@ static bool IOTC_RNWF11_PublishScopeSettings(void)
     }
     else
     {
-        /* QoS 0 (and DUP 0, a fresh message), not QoS 1 like the main
-         * telemetry publish right before this in the same Task() tick: back
-         * to back QoS 1 publishes fail here with "8.0,MQTT Error" on real
-         * hardware, matching a single-in-flight-QoS1-publish limitation -
-         * the module is still waiting on the PUBACK for the first message
-         * when this second AT+MQTTPUB arrives. QoS 0 is fire-and-forget, so
-         * it doesn't contend with that pending ack. */
+        /* Same command form as the main telemetry publish (the one form
+         * known to work on this topic); PublishStep() waits out that
+         * publish's ack before this one is sent. */
         char command[192];
-        int written = snprintf(command, sizeof(command), "AT+MQTTPUB=0,0,0,\"%s\",\"%s\"\r\n",
+        int written = snprintf(command, sizeof(command), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
                                 s_cfg.mqtt_pub_topic, escaped);
         if ((written < 0) || ((size_t)written >= sizeof(command)))
         {
@@ -560,7 +628,7 @@ static bool IOTC_RNWF11_PublishScopeSettings(void)
         }
         else
         {
-            sent = IOTC_RNWF11_Step("MQTTPUB-osc-settings", command);
+            sent = IOTC_RNWF11_PublishStep("MQTTPUB-osc-settings", command, true);
         }
     }
 
@@ -568,94 +636,209 @@ static bool IOTC_RNWF11_PublishScopeSettings(void)
     return sent;
 }
 
-/* Worst case (100 samples, both arrays, a huge but real achievable time
- * value at each - see SCOPE_SetRateMicroseconds()'s tick clamp) is roughly
- * 100 * 2 * ~11 chars/number plus field names/envelope - comfortably under
- * these, but generously sized (and static, not stack, to avoid adding ~2KB+
- * to an already-deep call stack) since real RNWF11 AT-line-length headroom
- * is unverified - see the plan's flagged risk. */
-#define IOTC_RNWF11_SCOPE_JSON_MAX 2048U
-#define IOTC_RNWF11_SCOPE_COMMAND_MAX 2304U
+/* Hard limit found by bisecting on real hardware (see the README's
+ * oscilloscope section): a complete AT+MQTTPUB command line - including the
+ * trailing "\r\n" - of 195 bytes or fewer is accepted, 196 or more fails with
+ * "0.4,Invalid Parameter". A whole scope capture is far bigger than that, so
+ * it is published as a sequence of chunks, each holding as many samples as
+ * still fit. */
+#define IOTC_RNWF11_MQTTPUB_LINE_MAX 195U
+/* Bytes of the command line that aren't the topic or the escaped payload:
+ * AT+MQTTPUB=1,1,0," (18) + "," (3) + "\r\n (3). */
+#define IOTC_RNWF11_MQTTPUB_FIXED 24U
+#define IOTC_RNWF11_SCOPE_CHUNK_JSON_MAX 160U
+#define IOTC_RNWF11_SCOPE_ARRAY_MAX 96U
 
-/* Called only from the top level of Task(), never from inside PollEvents() -
- * same reentrancy reasoning as IOTC_RNWF11_PublishTelemetry(). Builds the
- * message text by hand (matching the same "{"d":[{"d":{...}}]}" envelope
- * iotcl_telemetry_create() builds internally - see iotcl_telemetry.c) rather
- * than via cJSON's tree-building API: iotcl_telemetry_set_number()/_set_string()
- * have no array support, and building a ~200-node cJSON tree (2 arrays x up
- * to 100 samples) would cost several KB of per-node heap overhead on top of
- * cJSON's own growable print buffer - likely more than this project's entire
- * 4KB app heap (see bldc.X's linker --heap=4096). Hand-formatting into a
- * fixed static buffer uses no heap at all for this message. */
-static bool IOTC_RNWF11_PublishScopeData(void)
+/* Length the escaper would produce for json, without building it. */
+static size_t IOTC_RNWF11_EscapedLength(const char *json)
+{
+    size_t n = 0;
+    for (size_t i = 0; json[i] != '\0'; i++)
+    {
+        n += ((json[i] == '"') || (json[i] == '\\')) ? 2U : 1U;
+    }
+    return n;
+}
+
+/* Builds one chunk's JSON into json (the same "{"d":[{"d":{...}}]}" envelope
+ * iotcl_telemetry_create() builds internally), greedily adding samples from
+ * start while the finished AT command line still fits IOTC_RNWF11_MQTTPUB_LINE_MAX,
+ * up to maxCount samples. Returns how many samples it included (0 if not even
+ * one fits). osc_t/osc_v are STRING-typed template attributes holding
+ * bracketed array text - the dashboard parses that back into numbers. */
+static uint16_t IOTC_RNWF11_BuildScopeChunk(uint16_t start, uint16_t seq, uint16_t total,
+                                            uint16_t maxCount, char *json, size_t jsonSize)
 {
     uint16_t length = SCOPE_GetLength();
     uint32_t periodUs = SCOPE_GetRateMicroseconds();
+    size_t budget = IOTC_RNWF11_MQTTPUB_LINE_MAX - IOTC_RNWF11_MQTTPUB_FIXED - strlen(s_cfg.mqtt_pub_topic);
 
-    static char scopeJson[IOTC_RNWF11_SCOPE_JSON_MAX];
-    size_t pos = 0;
-    bool overflow = false;
+    static char tArr[IOTC_RNWF11_SCOPE_ARRAY_MAX];
+    static char vArr[IOTC_RNWF11_SCOPE_ARRAY_MAX];
+    static char cand[IOTC_RNWF11_SCOPE_CHUNK_JSON_MAX];
+    size_t tLen = 0;
+    size_t vLen = 0;
+    uint16_t count = 0;
 
-#define SCOPE_JSON_APPEND(...) \
-    do { \
-        int _w = snprintf(&scopeJson[pos], sizeof(scopeJson) - pos, __VA_ARGS__); \
-        if ((_w < 0) || ((size_t)_w >= (sizeof(scopeJson) - pos))) { overflow = true; } \
-        else { pos += (size_t)_w; } \
-    } while (0)
-
-    /* osc_t/osc_v are STRING-typed attributes in the device template (the
-     * template's OBJECT type doesn't support arrays) - the dashboard parses
-     * the bracketed array text back into numbers on its own end, so each one
-     * is a JSON string *containing* "[...]", not a bare JSON array value. */
-    SCOPE_JSON_APPEND("{\"d\":[{\"d\":{\"osc_t\":\"[");
-    for (uint16_t i = 0; (i < length) && !overflow; i++)
+    while (((uint16_t)(start + count) < length) && (count < maxCount))
     {
-        SCOPE_JSON_APPEND("%s%lu", (i == 0) ? "" : ",", (unsigned long)((uint32_t)i * periodUs));
-    }
-    SCOPE_JSON_APPEND("]\",\"osc_v\":\"[");
-    for (uint16_t i = 0; (i < length) && !overflow; i++)
-    {
-        SCOPE_JSON_APPEND("%s%d", (i == 0) ? "" : ",", (int)SCOPE_GetSample(i));
-    }
-    SCOPE_JSON_APPEND("]\"}}]}");
-#undef SCOPE_JSON_APPEND
-
-    if (overflow)
-    {
-        DEBUG_Printf("IOTC: scope JSON too long to build (%u samples)\r\n", (unsigned)length);
-        return false;
-    }
-
-    /* This payload is 100% digits/brackets/commas plus the fixed key-name
-     * quotes above - escaping only ever affects those few literal quotes,
-     * never the array contents, but reuse the shared escaper anyway for the
-     * same correctness reasons every other publish path does. */
-    static char scopeEscaped[IOTC_RNWF11_SCOPE_JSON_MAX];
-    bool escapedOk = IOTC_RNWF11_EscapeJsonForAtCommand(scopeJson, scopeEscaped, sizeof(scopeEscaped));
-
-    bool sent = false;
-    if (!escapedOk)
-    {
-        DEBUG_Printf("IOTC: scope JSON too long to escape (%u samples)\r\n", (unsigned)length);
-    }
-    else
-    {
-        static char scopeCommand[IOTC_RNWF11_SCOPE_COMMAND_MAX];
-        int written = snprintf(scopeCommand, sizeof(scopeCommand), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
-                                s_cfg.mqtt_pub_topic, scopeEscaped);
-        if ((written < 0) || ((size_t)written >= sizeof(scopeCommand)))
+        uint16_t idx = (uint16_t)(start + count);
+        int tw = snprintf(&tArr[tLen], sizeof(tArr) - tLen, "%s%lu",
+                          (count == 0U) ? "" : ",", (unsigned long)((uint32_t)idx * periodUs));
+        int vw = snprintf(&vArr[vLen], sizeof(vArr) - vLen, "%s%d",
+                          (count == 0U) ? "" : ",", (int)SCOPE_GetSample(idx));
+        if ((tw < 0) || ((size_t)tw >= (sizeof(tArr) - tLen)) ||
+            (vw < 0) || ((size_t)vw >= (sizeof(vArr) - vLen)))
         {
-            DEBUG_Printf("IOTC: scope command too long to send (%u samples)\r\n", (unsigned)length);
+            break;
         }
-        else
+        int cw = snprintf(cand, sizeof(cand),
+                          "{\"d\":[{\"d\":{\"osc_seq\":%u,\"osc_n\":%u,\"osc_t\":\"[%s]\",\"osc_v\":\"[%s]\"}}]}",
+                          (unsigned)seq, (unsigned)total, tArr, vArr);
+        if ((cw < 0) || ((size_t)cw >= sizeof(cand)) || (IOTC_RNWF11_EscapedLength(cand) > budget))
         {
-            sent = IOTC_RNWF11_Step("MQTTPUB-scope", scopeCommand);
+            break;
         }
+        memcpy(json, cand, (size_t)cw + 1U);
+        (void)jsonSize;
+        tLen += (size_t)tw;
+        vLen += (size_t)vw;
+        count++;
+    }
+    return count;
+}
+
+/* A finished capture is published by a small state machine that Task() advances
+ * once per pass instead of one blocking call, because a long capture is a lot
+ * of chunks (roughly 250 for 1000 samples, at ~80 ms each once the module's ack
+ * round trip is counted): blocking for that long froze telemetry, incoming
+ * commands and everything else in the main loop. Hand-formatted into small
+ * static buffers (no cJSON tree - see the 4KB heap note in bldc.X's linker
+ * settings). Only called from the top level of Task(), never from inside
+ * PollEvents() - same reentrancy reasoning as IOTC_RNWF11_PublishTelemetry().
+ *
+ *  PLANNING - works out how many samples go in each chunk, a few chunks per
+ *             pass, so every chunk can carry the final chunk count ("osc_n").
+ *             seq/total are unknown at this point, so the sizing uses
+ *             placeholders at least as wide as the real numbers (a chunk holds
+ *             at least one sample, so the count never exceeds the capture
+ *             length): the real, narrower values then always fit the plan.
+ *  SENDING  - builds and publishes one chunk per pass ("osc_seq" 1..osc_n),
+ *             waiting for the previous chunk's ack (without blocking) first.
+ *
+ * While a capture is being published Task() holds queued C2D commands back
+ * (the capture buffer and its rate/length must not change underneath it), and
+ * abandons the capture if the broker connection drops. */
+typedef enum
+{
+    SCOPE_TX_IDLE = 0,
+    SCOPE_TX_PLANNING,
+    SCOPE_TX_SENDING
+} scope_tx_state_t;
+
+/* A chunk always holds at least two samples with the default topic, so this
+ * covers SCOPE_BUFFER_MAX; a pathologically long topic that allowed only one
+ * sample per chunk would overflow it and abort the publish cleanly. */
+#define IOTC_RNWF11_SCOPE_MAX_CHUNKS 512U
+#define IOTC_RNWF11_SCOPE_PLAN_PER_PASS 8U
+
+static scope_tx_state_t scopeTxState;
+static char scopeJson[IOTC_RNWF11_SCOPE_CHUNK_JSON_MAX];
+static uint8_t scopeChunkSamples[IOTC_RNWF11_SCOPE_MAX_CHUNKS];
+static uint16_t scopeChunkCount;
+static uint16_t scopeTxLength;   /* samples in the capture being published */
+static uint16_t scopePlanned;    /* samples assigned to a chunk so far (planning) */
+static uint16_t scopeTxNext;     /* next chunk index to send */
+static uint16_t scopeTxStart;    /* first sample of that chunk */
+
+static void IOTC_RNWF11_ScopeTxAbort(const char *why)
+{
+    DEBUG_Printf("IOTC: scope publish aborted: %s\r\n", why);
+    scopeTxState = SCOPE_TX_IDLE;
+    SCOPE_ClearReady();
+}
+
+static void IOTC_RNWF11_ScopeTxBegin(void)
+{
+    scopeTxLength = SCOPE_GetLength();
+    scopeChunkCount = 0;
+    scopePlanned = 0;
+    scopeTxState = SCOPE_TX_PLANNING;
+}
+
+static void IOTC_RNWF11_ScopeTxPlanStep(void)
+{
+    uint16_t placeholder = (scopeTxLength <= 99U) ? 99U : 999U;
+
+    for (uint8_t i = 0; (i < IOTC_RNWF11_SCOPE_PLAN_PER_PASS) && (scopePlanned < scopeTxLength); i++)
+    {
+        uint16_t n = IOTC_RNWF11_BuildScopeChunk(scopePlanned, placeholder, placeholder, scopeTxLength,
+                                                 scopeJson, sizeof(scopeJson));
+        if ((n == 0U) || (scopeChunkCount >= IOTC_RNWF11_SCOPE_MAX_CHUNKS))
+        {
+            DEBUG_Printf("IOTC: scope chunk planning failed at sample %u\r\n", (unsigned)scopePlanned);
+            IOTC_RNWF11_ScopeTxAbort("cannot fit samples in a message");
+            return;
+        }
+        scopeChunkSamples[scopeChunkCount++] = (uint8_t)n;
+        scopePlanned += n;
     }
 
-    DEBUG_Printf("IOTC: scope publish %s (%u samples, %lu us/sample)\r\n",
-                 sent ? "ok" : "FAILED", (unsigned)length, (unsigned long)periodUs);
-    return sent;
+    if (scopePlanned >= scopeTxLength)
+    {
+        scopeTxNext = 0;
+        scopeTxStart = 0;
+        scopeTxState = SCOPE_TX_SENDING;
+        DEBUG_Printf("IOTC: scope publish: %u samples in %u chunks\r\n",
+                     (unsigned)scopeTxLength, (unsigned)scopeChunkCount);
+    }
+}
+
+static void IOTC_RNWF11_ScopeTxSendStep(void)
+{
+    if (!mqttLinkUp)
+    {
+        IOTC_RNWF11_ScopeTxAbort("broker disconnected");
+        return;
+    }
+    if (mqttPubAckPending && ((uint32_t)(IOTC_RNWF11_Now() - pubAckSentMs) < IOTC_RNWF11_PUBACK_WAIT_MS))
+    {
+        return; /* previous chunk not acked yet - try again next pass, without blocking */
+    }
+
+    static char escaped[IOTC_RNWF11_SCOPE_CHUNK_JSON_MAX * 2U];
+    static char command[IOTC_RNWF11_MQTTPUB_LINE_MAX + 8U];
+    uint16_t c = scopeTxNext;
+    uint16_t n = IOTC_RNWF11_BuildScopeChunk(scopeTxStart, (uint16_t)(c + 1U), scopeChunkCount,
+                                             scopeChunkSamples[c], scopeJson, sizeof(scopeJson));
+    int written = -1;
+    if ((n == scopeChunkSamples[c]) && IOTC_RNWF11_EscapeJsonForAtCommand(scopeJson, escaped, sizeof(escaped)))
+    {
+        written = snprintf(command, sizeof(command), "AT+MQTTPUB=1,1,0,\"%s\",\"%s\"\r\n",
+                           s_cfg.mqtt_pub_topic, escaped);
+    }
+    if ((written < 0) || ((size_t)written > IOTC_RNWF11_MQTTPUB_LINE_MAX))
+    {
+        DEBUG_Printf("IOTC: scope chunk %u/%u unsendable (cmd=%d)\r\n", (unsigned)(c + 1U), (unsigned)scopeChunkCount, written);
+        IOTC_RNWF11_ScopeTxAbort("chunk did not fit");
+        return;
+    }
+    if (!IOTC_RNWF11_PublishStep("MQTTPUB-scope", command, true))
+    {
+        IOTC_RNWF11_ScopeTxAbort("chunk publish failed");
+        return;
+    }
+
+    scopeTxStart += n;
+    scopeTxNext++;
+    if (scopeTxNext >= scopeChunkCount)
+    {
+        DEBUG_Printf("IOTC: scope publish ok (%u samples in %u chunks, %lu us/sample)\r\n",
+                     (unsigned)scopeTxLength, (unsigned)scopeChunkCount,
+                     (unsigned long)SCOPE_GetRateMicroseconds());
+        scopeTxState = SCOPE_TX_IDLE;
+        SCOPE_ClearReady();
+    }
 }
 
 /* Only ever called from the top level of Task()/OnCommand(), never from
@@ -682,7 +865,7 @@ static void IOTC_RNWF11_SendCmdAck(const char *ack_id, int status, const char *m
                                 s_cfg.mqtt_ack_topic, escaped);
         if ((written >= 0) && ((size_t)written < sizeof(command)))
         {
-            (void)IOTC_RNWF11_Step("MQTTPUB-ack", command);
+            (void)IOTC_RNWF11_PublishStep("MQTTPUB-ack", command, true);
         }
     }
     else
@@ -695,7 +878,7 @@ static void IOTC_RNWF11_SendCmdAck(const char *ack_id, int status, const char *m
 
 /* Registered as events.cmd_cb in IOTC_RNWF11_Initialize(). Invoked
  * synchronously from within iotcl_mqtt_receive_c2d_with_length(), called only
- * from the top level of Task() (see its pendingC2dMessage handling), so it's
+ * from the top level of Task() (see its c2dQueue handling), so it's
  * safe to issue AT commands (for the ack) from here. */
 static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
 {
@@ -768,7 +951,7 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
         if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (channel < 0) || (channel > SCOPE_CHANNEL_MAX))
         {
             status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "scope-channel requires an integer 0-5 (0=vdc,1=speed,2=duty,3=ibus,4=ia,5=ib)";
+            message = "scope-channel requires an integer 0-4 (0=vdc,1=duty,2=ibus,3=ia,4=ib)";
         }
         else
         {
@@ -796,7 +979,7 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
         if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (samples < 1))
         {
             status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "scope-length requires a positive integer (samples, clamped to 10-100)";
+            message = "scope-length requires a positive integer (samples, clamped to 10-1000)";
         }
         else
         {
@@ -813,21 +996,6 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
     else if (strcmp(command, "scope-capture") == 0)
     {
         SCOPE_StartCapture();
-    }
-    else if (strcmp(command, "test-pub") == 0)
-    {
-        /* TEMPORARY - see IOTC_RNWF11_TestPublish()'s comment. */
-        char *endptr = NULL;
-        long fillerLen = (arg != NULL) ? strtol(arg, &endptr, 10) : -1;
-        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (fillerLen < 0) || (fillerLen > (long)IOTC_RNWF11_TEST_PUB_MAX))
-        {
-            status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "test-pub requires an integer filler length (see debug console for result)";
-        }
-        else
-        {
-            (void)IOTC_RNWF11_TestPublish((uint16_t)fillerLen);
-        }
     }
     else
     {
@@ -920,6 +1088,7 @@ void IOTC_RNWF11_Tick1ms(void)
 #if IOTC_RNWF11_ENABLE
     telemetryMilliseconds++;
     retryMilliseconds++;
+    msNow++;
 #endif
 }
 
@@ -928,10 +1097,116 @@ void IOTC_RNWF11_SetTelemetry(const IOTC_RNWF11_Telemetry_t *sample)
     telemetry = *sample;
 }
 
+/* Queues a decoded C2D payload for Task() and, for the one command that must
+ * not wait, acts on it immediately. Called from the event handler only. */
+static void IOTC_RNWF11_QueueC2d(const char *payload, size_t payloadLen)
+{
+    /* Safety fast path: motor-stop takes effect the moment it is received, not
+     * when Task() gets to it - Task() holds commands back while a scope capture
+     * is being published, and a long one can take many seconds. Stopping is just
+     * clearing a flag, so it is safe to do from here; the message is still queued
+     * below so the normal handler runs it again (harmless) and sends its ack. */
+    if (strstr(payload, "\"motor-stop\"") != NULL)
+    {
+        MCAPP_MotorStop();
+        DEBUG_Printf("IOTC: motor-stop received - stopping immediately\r\n");
+    }
+
+    if (c2dQueueCount >= IOTC_RNWF11_C2D_QUEUE_LEN)
+    {
+        DEBUG_Printf("IOTC: C2D queue full, dropping message\r\n");
+        return;
+    }
+    uint8_t slot = (uint8_t)((c2dQueueHead + c2dQueueCount) % IOTC_RNWF11_C2D_QUEUE_LEN);
+    memcpy(c2dQueue[slot], payload, payloadLen + 1U);
+    c2dQueueLen[slot] = payloadLen;
+    c2dQueueCount++;
+}
+
 /*
- * The module reports real connection state asynchronously; command replies only
- * say whether the command itself was accepted.
+ * Handles one complete line from the module: real connection state arrives
+ * asynchronously (command replies only say whether the command itself was
+ * accepted), as do C2D messages and publish acks.
  */
+static void IOTC_RNWF11_HandleEventLine(const char *line)
+{
+    DEBUG_Printf("IOTC: event %s\r\n", line);
+
+    /* Checked first: a C2D payload could contain any of the substrings the
+     * other branches look for. */
+    if (strncmp(line, "+MQTTSUBRX:", 11) == 0)
+    {
+        /* Observed format: +MQTTSUBRX:<DUP>,<QOS>,<RETAIN>,"<TOPIC_NAME>","<PAYLOAD>"
+         * (confirmed against real hardware - the module inlines the payload
+         * here rather than requiring a follow-up AT+MQTTSUBRD for messages
+         * under its read threshold; see the c2dQueue comment above).
+         * Deliberately does not act on the message from here (bar the
+         * motor-stop fast path in IOTC_RNWF11_QueueC2d()) -
+         * iotcl_mqtt_receive_c2d_with_length() may itself publish a command ack
+         * (an AT command), and this function can run nested inside other
+         * in-flight IOTC_RNWF11_Command() calls elsewhere in this file, so a
+         * nested command here would stomp the shared lastResponse buffer out
+         * from under the outer call. Task() picks the queued payload up instead,
+         * from its own top-level call. */
+        const char *p = line + 11;
+        for (uint8_t skip = 0; (skip < 3U) && (p != NULL); skip++)
+        {
+            p = strchr(p, ',');
+            if (p != NULL)
+            {
+                p++;
+            }
+        }
+        if ((p != NULL) && (*p == '"'))
+        {
+            char discardTopic[IOTC_RNWF11_C2D_TOPIC_MAX];
+            const char *afterTopic = IOTC_RNWF11_UnescapeQuotedString(p + 1, discardTopic, sizeof(discardTopic), NULL);
+            if ((afterTopic != NULL) && (*afterTopic == ',') && (*(afterTopic + 1) == '"'))
+            {
+                static char scratch[IOTC_RNWF11_C2D_PAYLOAD_MAX];
+                size_t payloadLen = 0;
+                const char *afterPayload = IOTC_RNWF11_UnescapeQuotedString(afterTopic + 2, scratch,
+                                                                             sizeof(scratch), &payloadLen);
+                if (afterPayload != NULL)
+                {
+                    IOTC_RNWF11_QueueC2d(scratch, payloadLen);
+                }
+            }
+        }
+    }
+    else if (strstr(line, "+MQTTCONN:1") != NULL)
+    {
+        mqttLinkUp = true;
+    }
+    else if (strstr(line, "+MQTTCONN:0") != NULL)
+    {
+        mqttLinkUp = false;
+    }
+    else if (strstr(line, "+MQTTPUBACK") != NULL)
+    {
+        mqttPubAckPending = false;
+    }
+    else if (strstr(line, "+WSTAAIP:") != NULL)
+    {
+        /* The leading number is a per-association counter, not
+         * a fixed interface id - it increments every time the
+         * module reconnects (seen going 1 -> 3 after adding an
+         * explicit AT+WSTA=0/1 disconnect+reconnect cycle), so
+         * matching only ":1" missed every later reconnect. */
+        netUp = true;
+    }
+    else if (strstr(line, "+WSTALU:0") != NULL)
+    {
+        netUp = false;
+        mqttLinkUp = false;
+    }
+    else if (strstr(line, "20.2") != NULL)
+    {
+        /* The module reports this when STA is already connected. */
+        netUp = true;
+    }
+}
+
 static void IOTC_RNWF11_PollEvents(void)
 {
     static char line[128];
@@ -945,74 +1220,7 @@ static void IOTC_RNWF11_PollEvents(void)
             if (len > 0U)
             {
                 line[len] = '\0';
-                DEBUG_Printf("IOTC: event %s\r\n", line);
-                if (strstr(line, "+MQTTCONN:1") != NULL)
-                {
-                    mqttLinkUp = true;
-                }
-                else if (strstr(line, "+MQTTCONN:0") != NULL)
-                {
-                    mqttLinkUp = false;
-                }
-                else if (strstr(line, "+WSTAAIP:") != NULL)
-                {
-                    /* The leading number is a per-association counter, not
-                     * a fixed interface id - it increments every time the
-                     * module reconnects (seen going 1 -> 3 after adding an
-                     * explicit AT+WSTA=0/1 disconnect+reconnect cycle), so
-                     * matching only ":1" missed every later reconnect. */
-                    netUp = true;
-                }
-                else if (strstr(line, "+WSTALU:0") != NULL)
-                {
-                    netUp = false;
-                    mqttLinkUp = false;
-                }
-                else if (strstr(line, "20.2") != NULL)
-                {
-                    /* The module reports this when STA is already connected. */
-                    netUp = true;
-                }
-                else if (strncmp(line, "+MQTTSUBRX:", 11) == 0)
-                {
-                    /* Observed format: +MQTTSUBRX:<DUP>,<QOS>,<RETAIN>,"<TOPIC_NAME>","<PAYLOAD>"
-                     * (confirmed against real hardware - the module inlines
-                     * the payload here rather than requiring a follow-up
-                     * AT+MQTTSUBRD for messages under its read threshold; see
-                     * the pendingC2dPayload comment above). Deliberately does
-                     * not act on the message from here - iotcl_mqtt_receive_c2d_with_length()
-                     * may itself publish a command ack (an AT command), and
-                     * this function runs nested inside other in-flight
-                     * IOTC_RNWF11_Command() calls elsewhere in this file, so a
-                     * nested command here would stomp the shared lastResponse
-                     * buffer out from under the outer call. Task() picks the
-                     * stored payload up instead, from its own top-level call. */
-                    const char *p = line + 11;
-                    for (uint8_t skip = 0; (skip < 3U) && (p != NULL); skip++)
-                    {
-                        p = strchr(p, ',');
-                        if (p != NULL)
-                        {
-                            p++;
-                        }
-                    }
-                    if ((p != NULL) && (*p == '"'))
-                    {
-                        char discardTopic[IOTC_RNWF11_C2D_TOPIC_MAX];
-                        const char *afterTopic = IOTC_RNWF11_UnescapeQuotedString(p + 1, discardTopic, sizeof(discardTopic), NULL);
-                        if ((afterTopic != NULL) && (*afterTopic == ',') && (*(afterTopic + 1) == '"'))
-                        {
-                            size_t payloadLen = 0;
-                            const char *afterPayload = IOTC_RNWF11_UnescapeQuotedString(afterTopic + 2, pendingC2dPayload,
-                                                                                         sizeof(pendingC2dPayload), &payloadLen);
-                            if (afterPayload != NULL)
-                            {
-                                pendingC2dPayloadLen = payloadLen;
-                                pendingC2dMessage = true;
-                            }
-                        }
-                    }
-                }
+                IOTC_RNWF11_HandleEventLine(line);
                 len = 0;
             }
         }
@@ -1033,6 +1241,21 @@ void IOTC_RNWF11_Task(void)
     IOTC_RNWF11_PollEvents();
     if (!iotcConnected)
     {
+        if (scopeTxState != SCOPE_TX_IDLE)
+        {
+            IOTC_RNWF11_ScopeTxAbort("connection lost");
+        }
+        if (netUp && mqttLinkUp)
+        {
+            /* The broker connected after Configure() had already given up
+             * (see the wait loop there) - keep that session rather than
+             * tearing it down with another WSTA/MQTTCONN cycle. */
+            DEBUG_Printf("IOTC: broker connected late, adopting session\r\n");
+            IOTC_RNWF11_Subscribe();
+            iotcConnected = true;
+            telemetryMilliseconds = 0;
+            return;
+        }
         if (!netUp)
         {
             return;
@@ -1059,16 +1282,36 @@ void IOTC_RNWF11_Task(void)
         telemetryMilliseconds = 0;
         return;
     }
-    if (pendingC2dMessage)
+    /* Scope capture publishing, one small step per pass (see the state machine
+     * comment above). Ahead of the command handling below so that a capture that
+     * has just finished filling is picked up - and starts holding commands back -
+     * before a queued scope-capture/rate/length command can disturb it. */
+    if (scopeTxState == SCOPE_TX_PLANNING)
     {
-        pendingC2dMessage = false;
-        DEBUG_Printf("IOTC: C2D message (%u bytes): %s\r\n", (unsigned)pendingC2dPayloadLen, pendingC2dPayload);
-        (void)iotcl_mqtt_receive_c2d_with_length((const uint8_t *)pendingC2dPayload, pendingC2dPayloadLen);
+        IOTC_RNWF11_ScopeTxPlanStep();
     }
-    if (SCOPE_IsReady())
+    else if (scopeTxState == SCOPE_TX_SENDING)
     {
-        (void)IOTC_RNWF11_PublishScopeData();
-        SCOPE_ClearReady();
+        IOTC_RNWF11_ScopeTxSendStep();
+    }
+    else if (SCOPE_IsReady())
+    {
+        IOTC_RNWF11_ScopeTxBegin();
+    }
+
+    /* Queued C2D commands run one per pass, and only once no capture is being
+     * published: the capture buffer and its rate/length must not change under
+     * the publisher. (motor-stop is the exception - it is acted on the instant it
+     * arrives, see IOTC_RNWF11_QueueC2d().) */
+    if ((c2dQueueCount > 0U) && (scopeTxState == SCOPE_TX_IDLE))
+    {
+        uint8_t head = c2dQueueHead;
+        DEBUG_Printf("IOTC: C2D message (%u bytes): %s\r\n", (unsigned)c2dQueueLen[head], c2dQueue[head]);
+        (void)iotcl_mqtt_receive_c2d_with_length((const uint8_t *)c2dQueue[head], c2dQueueLen[head]);
+        /* Released only now: the handler above can publish an ack, which polls
+         * events and may queue further messages - they must not land in this slot. */
+        c2dQueueHead = (uint8_t)((head + 1U) % IOTC_RNWF11_C2D_QUEUE_LEN);
+        c2dQueueCount--;
     }
     if (telemetryMilliseconds >= IOTC_TELEMETRY_PERIOD_MS)
     {

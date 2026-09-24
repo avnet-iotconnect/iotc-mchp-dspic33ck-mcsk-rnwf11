@@ -292,7 +292,8 @@ every 10 seconds:
 
 (`run` = motor running, `st` = state machine state, `sec` = commutation
 sector, `rpm`/`spd` = requested/measured speed, `ic`/`im` = requested/measured
-current, `duty` = PWM duty cycle, `vdc` = DC bus voltage ADC reading.) Watch it
+current, `duty` = PWM duty cycle, `vdc` = DC bus voltage ADC reading - multiply by
+0.002176 for volts, e.g. 11064 is about 24.1 V.) Watch it
 arrive on the device's **Live Data** tab in the /IOTCONNECT console.
 
 The current oscilloscope settings publish as their own small message, on the
@@ -308,7 +309,15 @@ above - see [Software Oscilloscope](#software-oscilloscope) below for why.
 ### Motor Control Commands
 
 The motor behavior is primarily driven by /IOTCONNECT C2D commands, but **SW1** on the board itself can be 
-used to toggle the motor power manually.
+used to toggle the motor power manually. SW1 is handled in the motor control interrupt, so
+it responds immediately whatever else the firmware is doing - including while it is
+connecting to Wi-Fi or the broker, or publishing a scope capture - which makes it the
+reliable local stop if the internet connection drops.
+
+Commands that arrive while a scope capture is being published are queued (up to 4)
+and run, in order, once the capture has finished, so they can't disturb the capture.
+The exception is `motor-stop`, which stops the motor the moment it is received; its
+acknowledgement is sent later with the rest of the queue.
 
 | Command         | Parameter         | Effect                                   |
 |-----------------|--------------------|-------------------------------------------|
@@ -329,9 +338,9 @@ curious). It's a one-shot "single sweep" capture, not a continuous trigger.
 
 | Command          | Parameter           | Effect                                      |
 |------------------|---------------------|----------------------------------------------|
-| `scope-channel`  | integer, `0`-`5`    | Selects the signal to capture: `0`=DC bus voltage (default), `1`=measured speed, `2`=PWM duty cycle, `3`=bus current, `4`=phase A current, `5`=phase B current |
+| `scope-channel`  | integer, `0`-`4`    | Selects the signal to capture: `0`=DC bus voltage (default), `1`=PWM duty cycle, `2`=bus current, `3`=phase A current, `4`=phase B current |
 | `scope-rate`     | integer (µs)        | Sample period in microseconds, rounded to the nearest 50µs (the motor control loop's tick rate); default 500µs (2kHz) |
-| `scope-length`   | integer, `10`-`100` | Number of samples per capture; default 50 (a 25ms window at the default rate) |
+| `scope-length`   | integer, `10`-`1000` | Number of samples per capture; default 50 (a 25ms window at the default rate) |
 | `scope-capture`  | none                | Starts a new capture using the current channel/rate/length settings |
 
 The default rate/length aren't arbitrary: this motor's `MAX_MOTORSPEED` (4600
@@ -342,34 +351,108 @@ zigzag, while 50 samples spans several full cycles at any speed the motor
 actually runs at.
 
 Once a capture fills its buffer, the firmware publishes it (independent of
-the normal 10-second telemetry cadence) as:
+the normal 10-second telemetry cadence) as a series of **chunks**, sent back to
+back, each carrying a slice of the two arrays:
 
 ```json
-{"osc_t": "[0,500,1000,...]", "osc_v": "[15230,15228,15235,...]"}
+{"osc_seq": 1, "osc_n": 10, "osc_t": "[0,500,1000,1500,2000,2500]", "osc_v": "[4000,4037,4074,15,52,89]"}
+{"osc_seq": 2, "osc_n": 10, "osc_t": "[3000,3500,4000,4500,5000,5500]", "osc_v": "[126,163,200,237,274,311]"}
+...
 ```
 
-Both fields are `STRING`-typed attributes carrying a bracketed array of
-numbers as text (not raw JSON arrays - the device template's `OBJECT` type
-doesn't support arrays), meant to be parsed back into numbers on the
-consuming end. `osc_t` is elapsed microseconds since the capture started
-(`osc_rate * sample index`); `osc_v` is the raw value of the selected channel
-at each point, in the same units as that channel's regular telemetry field
-(`vdc`/`spd`/`duty`/`im` respectively - note `im` is currently always 0, see
-the telemetry field notes above).
+`osc_seq` is the 1-based chunk number and `osc_n` the total chunk count, so the
+capture is complete once `osc_seq` equals `osc_n`; concatenate the `osc_t` and
+`osc_v` arrays in `osc_seq` order to rebuild it. Both arrays are
+`STRING`-typed attributes carrying a bracketed array of numbers as text (not raw
+JSON arrays - the device template's `OBJECT` type doesn't support arrays), meant
+to be parsed back into numbers on the consuming end. `osc_t` is elapsed
+microseconds since the capture started (`osc_rate * sample index`); `osc_v` is
+the raw value of the selected channel at each point, in the same units as that
+channel's regular telemetry field (`vdc`/`duty` for channels 0/1). The bus and
+phase current channels are raw ADC counts (the telemetry `im` field is always
+0 - see the telemetry field notes above). Measured speed is intentionally not a
+scope channel: it only updates once per electrical revolution, far too slowly to
+be worth capturing - use the `spd` telemetry field for it.
 
-> [!WARNING]
-> Real hardware testing has now confirmed the RNWF11 has an **undocumented
-> AT command length ceiling somewhere between 158 and 197 bytes** (a routine
-> telemetry publish worked at 158 bytes and failed with `"Invalid Parameter"`
-> once 3 fields were added, growing it to 197 - nothing in the documented
-> `+MQTTC` parameters explains a limit at that size). At the default
-> `scope-length` of 50, a capture's full `AT+MQTTPUB` command is
-> **600+ bytes** - even a 5-sample capture is already ~161 bytes. **The
-> capture-publish feature as currently built is very likely non-functional
-> at any sample count** until this is worked around (most likely by chunking
-> the capture across multiple smaller publishes). Test it, but expect it to
-> fail, and let me know if you'd like help redesigning it around the real
-> limit once we've pinned it down more exactly.
+#### Converting to engineering units
+
+Values published by the device are raw; [plot_scope_capture.py](tools/plot_scope_capture.py)
+converts them using this board's actual component values (from the DM330031
+schematic and the firmware):
+
+| Channel | Conversion | Basis |
+|---|---|---|
+| 0 - DC bus voltage | volts = value x 0.002176 | 34k + 34k + 3.3k divider (21.6:1), 3.3 V reference, 12-bit result left-justified in 16 bits and stored `>> 1` |
+| 1 - PWM duty | % = value / 4999 x 100 | PWM period of 4999 counts (50 us at 200 MHz) |
+| 2, 3, 4 - bus / phase A / phase B current | amps = (value - offset) x 0.000666 | 10 mOhm shunts, difference amplifier gain 4.02k / (62 + 470) = 7.56, 1.65 V bias, 3.3 V reference; the firmware reports these signed, 0 at mid-scale (about +/-21.8 A full scale, 10.7 mA per ADC step) |
+
+The firmware does no current offset calibration, so with zero current the
+current channels read a small non-zero value (amplifier and reference
+tolerance). To zero them, capture a current channel with the motor stopped and
+pass the mean raw value to the plot script as `--offset`.
+
+#### Suggested capture settings
+
+This kit's motor runs from 24 V with 2 pole pairs and a 4600 RPM maximum
+(`bldc_main.h`), so the electrical frequency is `RPM / 60 x 2` and one electrical
+cycle is `6e7 / (RPM x 2)` us. Six-step commutation changes step six times per
+electrical cycle. The sample period floor is 50 us (the 20 kHz PWM), and a capture
+holds 10 to 1000 samples. A few hundred samples is plenty for these windows (the
+table uses 100); longer captures cost publish time (see the note below). Choose
+the rate so the window covers about one to one and a half electrical cycles:
+
+| Motor speed | Electrical cycle | One commutation step | Rate for phase / bus current | Window (100 samples) |
+|---|---|---|---|---|
+| 10% (460 RPM) | 65 ms | 10.9 ms | 700 us | 70 ms |
+| 50% (2300 RPM) | 13 ms | 2.2 ms | 150 us | 15 ms |
+| 100% (4600 RPM) | 6.5 ms | 1.1 ms | 100 us | 10 ms |
+
+For what to look at:
+
+| Goal | Channel | Rate | Length | Window | Notes |
+|---|---|---|---|---|---|
+| Commutation current shape | 3 or 4 (phase A/B), 2 (bus) | see table above | 100 | 1-1.5 electrical cycles | The phase shunts are in the low-side legs, so in six-step each one only carries current while its own low-side switch conducts - expect pulses gated to the commutation sectors, not a sine wave. The bus channel is the DC-link return current. |
+| Bus voltage ripple and commutation transients | 0 | 50 us | 100 | 5 ms | A stiff 24 V supply reads nearly flat: a few tens of mV of noise with occasional short excursions. |
+| Bus sag / regeneration on start, stop, reverse | 0 | 50 ms | 100 | 5 s | Send `scope-capture`, then the motor command. |
+| Speed-loop response (duty step) | 1 | 50 ms (20 ms for a faster look) | 100 | 5 s (2 s) | Send `scope-capture`, then `motor-speed`. Cloud latency is a second or two, so the step lands early in the window, not at time zero. |
+| Start-up inrush | 2 | 20 ms | 100 | 2 s | Send `scope-capture`, then `motor-start`. |
+
+The scope samples one channel per capture and has no trigger, so two channels
+can't be compared for timing (for example the phase relationship of phase A
+against phase B): two captures have no common time reference. The ADC is sampled
+once per PWM period, so PWM switching ripple is not visible.
+
+To look at a capture, copy the chunk lines from the device's **Live Data** tab
+into a text file and run:
+
+```
+python3 tools/plot_scope_capture.py live_data.txt            # opens a plot window
+python3 tools/plot_scope_capture.py live_data.txt --out capture.png
+```
+
+[plot_scope_capture.py](tools/plot_scope_capture.py) ignores unrelated lines,
+puts the chunks back together in `osc_seq` order (whichever order the console
+listed them in), reports incomplete captures, and plots the last complete one
+(`--list` and `--index` pick another). It needs `matplotlib`
+(`pip install matplotlib`).
+
+> [!NOTE]
+> Chunking exists because of two limits found on real hardware: the RNWF11
+> rejects any `AT+MQTTPUB` command line longer than **195 bytes** (including
+> the topic and the trailing `\r\n`) with `"Invalid Parameter"`, and it rejects
+> a publish sent while the previous one is still waiting for its `+MQTTPUBACK`
+> (`"MQTT Error"`), so the firmware waits for each ack before sending the next
+> message. That works out to roughly 4-5 samples per chunk - about 10 chunks
+> for the default 50 samples, about 20 for 100, and 200-330 for the
+> 1000-sample maximum (each chunk is one /IOTCONNECT message). Each chunk takes
+> about 60-130 ms to be acknowledged, so a 100-sample capture publishes in a
+> couple of seconds and a 1000-sample one in roughly 20-40 s.
+>
+> The publish runs a few chunks at a time from the main loop rather than as one
+> blocking call, so telemetry, SW1 and the motor control carry on normally
+> while it goes. Queued commands wait for it to finish (except `motor-stop`,
+> see above), and a capture is abandoned if the broker connection drops
+> partway through.
 
 ## 10. Resources
 
