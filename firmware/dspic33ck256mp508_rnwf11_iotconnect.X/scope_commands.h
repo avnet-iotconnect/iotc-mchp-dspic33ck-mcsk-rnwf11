@@ -16,6 +16,17 @@ extern "C" {
 // would duplicate its file-scope PWM_STATE* array definitions.
 
 #define SCOPE_BUFFER_MAX 1000U
+#define SCOPE_LENGTH_MIN 10U
+
+// The true achievable range of SCOPE_SetRateMicroseconds() - 1 ADC tick
+// (50us, the fastest possible) to 0xFFFF ticks (the counter's width), the
+// same bounds that function's own clamping enforces internally (bldc_main.c).
+// Exposed here so IOTC_RNWF11_OnCommand() (iotconnect_rnwf11.c, a different
+// translation unit) can REJECT an out-of-range scope-rate command with a
+// precise message instead of silently accepting it and letting the setter
+// clamp it to a different value than what was asked for.
+#define SCOPE_RATE_US_MIN 50UL
+#define SCOPE_RATE_US_MAX 3276750UL
 
 // Channel indices for SCOPE_SetChannel()/SCOPE_GetChannel().
 #define SCOPE_CHANNEL_VDC    0U // DC bus voltage, raw ADC (default)
@@ -29,8 +40,8 @@ extern "C" {
 #define SCOPE_CHANNEL_MAX    SCOPE_CHANNEL_IB
 
 void SCOPE_SetChannel(uint8_t channel);       // clamps to 0-SCOPE_CHANNEL_MAX (SCOPE_CHANNEL_*)
-void SCOPE_SetRateMicroseconds(uint32_t us);  // rounds to the nearest 50us ADC tick, clamps to >=1 tick
-void SCOPE_SetLength(uint16_t length);        // clamps to [10, SCOPE_BUFFER_MAX]
+void SCOPE_SetRateMicroseconds(uint32_t us);  // rounds to the nearest 50us ADC tick, clamps to [SCOPE_RATE_US_MIN, SCOPE_RATE_US_MAX]
+void SCOPE_SetLength(uint16_t length);        // clamps to [SCOPE_LENGTH_MIN, SCOPE_BUFFER_MAX]
 void SCOPE_StartCapture(void);                // resets the buffer and arms a new one-shot capture
 
 bool SCOPE_IsReady(void);                     // true once an armed capture has filled its buffer

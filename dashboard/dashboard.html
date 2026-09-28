@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCSK BLDC Dashboard</title>
+<style>
+/* Palette: the dataviz skill's validated reference instance (references/palette.md).
+   Dark is the DEFAULT, unconditionally (a hardware cockpit is normally viewed in a
+   dim room) - not "whatever the OS prefers", which is what an earlier version of
+   this actually did despite this comment already claiming dark was the default:
+   the base :root{} held the light values, with dark only reachable via a
+   prefers-color-scheme media query or the manual toggle. Light is a real, supported
+   mode, not an afterthought - just an explicit opt-in now (the toggle, persisted
+   via data-theme/localStorage - see $("themebtn") below), not something the OS
+   picks for you. */
+:root{
+ --surface-1:#1a1a19;--page:#0d0d0d;--text-primary:#fff;--text-secondary:#c3c2b7;--text-muted:#898781;
+ --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.10);
+ --series-1:#3987e5;--good:#0ca30c;--warning:#fab219;--critical:#e66767;--lime:#32cd32;
+ color-scheme:dark;
+}
+:root[data-theme="light"]{
+ --surface-1:#fcfcfb;--page:#f9f9f7;--text-primary:#0b0b0b;--text-secondary:#52514e;--text-muted:#898781;
+ --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);
+ --series-1:#2a78d6;--good:#0ca30c;--warning:#fab219;--critical:#d03b3b;--lime:#32cd32;
+ color-scheme:light;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text-primary);
+     font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}
+.wrap{max-width:1200px;margin:0 auto;padding:18px 18px 50px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:800;letter-spacing:.3px;white-space:nowrap}
+.brand .slash{color:var(--series-1);font-weight:700}
+.brand .prod{font-weight:600;color:var(--text-secondary);font-size:.92rem}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 0 16px;
+       border-bottom:1px solid var(--border);margin-bottom:16px}
+.spacer{flex:1}
+select{background:var(--surface-1);color:var(--text-primary);border:1px solid var(--border);
+       border-radius:8px;padding:7px 10px;font:inherit}
+.pill{font-size:.76rem;padding:4px 11px;border-radius:999px;border:1px solid var(--border);
+     background:var(--surface-1);color:var(--text-muted);white-space:nowrap}
+.pill.live{color:var(--good);border-color:var(--good)}
+.pill.dead{color:var(--critical);border-color:var(--critical)}
+button{background:var(--series-1);color:#fff;border:0;border-radius:8px;padding:9px 14px;
+      font:600 .9rem inherit;cursor:pointer}
+button:hover:not(:disabled){filter:brightness(1.1)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.ghost{background:transparent;border:1px solid var(--border);color:var(--text-primary)}
+button.lime{background:var(--lime);color:#04130a}
+button.red{background:var(--critical);color:#fff}
+input[type=number],input[type=email],input[type=password]{
+ width:100%;background:var(--page);color:var(--text-primary);border:1px solid var(--border);
+ border-radius:8px;padding:9px 11px;font:inherit}
+input:focus{outline:2px solid var(--series-1);outline-offset:1px}
+label{display:block;font-size:.78rem;color:var(--text-secondary);margin:9px 0 4px;font-weight:600}
+.card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
+     padding:16px;margin-bottom:14px}
+.card h2{margin:0 0 12px;font-size:.85rem;letter-spacing:.4px;text-transform:uppercase;color:var(--text-secondary)}
+.shell{display:grid;gap:14px}
+@media(min-width:1020px){.shell{grid-template-columns:1fr 300px;align-items:start}
+ .rail{position:sticky;top:14px;max-height:calc(100vh - 28px);display:flex;flex-direction:column}}
+.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:100px}
+.row.tight>*{flex:0 0 auto;min-width:0}
+/* ---- stat tiles (marks-and-anatomy.md figures) ---- */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.tile{background:var(--page);border:1px solid var(--border);border-radius:10px;padding:9px 11px}
+.tile .k{font-size:.66rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.tile .v{font-weight:600;font-size:1.05rem;overflow-wrap:anywhere;margin-top:2px}
+.tile .v small{font-size:.66rem;color:var(--text-muted);font-weight:500;margin-left:2px}
+/* ---- gauge ---- */
+.gaugewrap{display:flex;align-items:center;gap:14px;margin-bottom:12px}
+.gaugewrap svg{flex:0 0 auto}
+.gaugewrap .glab{color:var(--text-secondary);font-size:.85rem}
+/* ---- scope chart ---- */
+.scopehead{display:flex;gap:14px;flex-wrap:wrap;align-items:baseline;margin-bottom:6px;font-size:.84rem;color:var(--text-secondary)}
+.scopehead b{color:var(--text-primary)}
+.chartbox{position:relative}
+.chartbox svg{width:100%;height:auto;display:block}
+.chartbox .gridline{stroke:var(--grid);stroke-width:1}
+.chartbox .axis{stroke:var(--axis);stroke-width:1}
+.chartbox .trace{fill:none;stroke:var(--series-1);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chartbox .tick{fill:var(--text-muted);font-size:11px}
+.chartbox .xhair{stroke:var(--text-muted);stroke-width:1;stroke-dasharray:2,3;pointer-events:none}
+.chartbox .xdot{fill:var(--series-1);stroke:var(--surface-1);stroke-width:2}
+.chartbox .overlay{fill:transparent;cursor:crosshair}
+.tooltip{position:absolute;pointer-events:none;background:var(--surface-1);border:1px solid var(--border);
+        border-radius:8px;padding:6px 9px;font-size:.78rem;color:var(--text-secondary);
+        box-shadow:0 2px 10px rgba(0,0,0,.25);white-space:nowrap;transform:translate(-50%,-115%)}
+.tooltip b{color:var(--text-primary);font-variant-numeric:tabular-nums}
+/* ---- misc ---- */
+.log{font:12px/1.55 ui-monospace,Menlo,Consolas,monospace;overflow:auto;color:var(--text-secondary);
+    flex:1;min-height:160px}
+.log div{padding:2px 0;border-bottom:1px solid var(--border)}
+.err{color:var(--critical)}.ok{color:var(--good)}.dim{color:var(--text-muted)}.warn{color:var(--warning)}
+.login{max-width:380px;margin:10vh auto}
+.hidden{display:none}
+footer{margin-top:20px;color:var(--text-muted);font-size:.76rem;text-align:center}
+</style></head><body><div class="wrap">
+
+<div id="loginview" class="login">
+ <div class="brand" style="justify-content:center;margin-bottom:16px;font-size:1.1rem">
+  Avnet<span class="slash">/</span><span>IOTCONNECT</span></div>
+ <p class="dim" style="text-align:center;margin-top:0">This dashboard works with anyone's /IOTCONNECT
+  account - sign in with your own solution key, environment, email and password.</p>
+ <div class="card">
+  <label for="solkey">Solution key</label><input id="solkey" type="password" autocomplete="off">
+  <label for="ioenv">Environment</label><input id="ioenv" autocomplete="off"
+   placeholder="from Settings → Key Value">
+  <label for="email">Email</label><input id="email" type="email" autocomplete="username">
+  <label for="password">Password</label><input id="password" type="password" autocomplete="current-password">
+  <label style="display:flex;align-items:center;gap:7px;margin-top:11px;font-weight:400;color:var(--text-secondary)">
+   <input type="checkbox" id="rememberme" style="width:auto"> Remember the solution key/environment on this device
+  </label>
+  <button id="loginbtn" style="width:100%;margin-top:14px">Sign in</button>
+  <div id="loginstatus" style="margin-top:10px;font-size:.85rem"></div>
+  <p class="dim" style="font-size:.76rem;margin-bottom:0">
+   The solution key and your password are sent straight to this dashboard's own backend over HTTPS,
+   never to a third party. Unlike the password (traded once for a session token), the solution key
+   has to be resent with every request this page makes, so it stays in this browser tab's session
+   storage - or, if you check the box above, in this browser's local storage - for as long as you're
+   signed in. Use a private/incognito window if this is a shared computer.
+  </p>
+ </div>
+</div>
+
+<div id="dash" class="hidden">
+ <header>
+  <div class="brand">Avnet<span class="slash">/</span><span>IOTCONNECT</span>
+   <span class="prod">&nbsp;&middot; MCSK BLDC dashboard</span></div>
+  <select id="devsel" title="Board"></select>
+  <span class="pill" id="livepill">&hellip;</span>
+  <span class="spacer"></span>
+  <button class="ghost" id="themebtn" title="Toggle light/dark">&#9788;</button>
+  <button class="ghost" id="logout">Sign out</button>
+ </header>
+
+ <div class="shell">
+  <div>
+
+   <div class="card">
+    <h2>Motor telemetry</h2>
+    <div class="gaugewrap">
+     <div id="gauge"></div>
+     <div class="glab">Duty cycle &mdash; the PWM speed-loop output, as a percent of the switching period.</div>
+    </div>
+    <div class="tiles" id="tiles"></div>
+   </div>
+
+   <div class="card">
+    <h2>Motor control</h2>
+    <div class="row tight">
+     <button class="lime" data-cmd="motor-start">Start</button>
+     <button class="red" data-cmd="motor-stop">Stop</button>
+     <button data-cmd="motor-reverse">Reverse</button>
+    </div>
+    <label for="speedval">Speed (% of max RPM)</label>
+    <div class="row tight">
+     <input id="speedval" type="number" min="0" max="100" value="50" style="max-width:100px">
+     <button class="ghost" id="speedbtn">Set speed</button>
+    </div>
+   </div>
+
+   <div class="card">
+    <h2>Software oscilloscope</h2>
+    <div class="row">
+     <div>
+      <label for="oscch">Channel</label>
+      <select id="oscch">
+       <option value="0">0 &middot; DC bus voltage</option>
+       <option value="1">1 &middot; PWM duty cycle</option>
+       <option value="2">2 &middot; Bus current</option>
+       <option value="3">3 &middot; Phase A current</option>
+       <option value="4">4 &middot; Phase B current</option>
+      </select>
+     </div>
+     <div>
+      <label for="oscrate">Rate (&micro;s/sample)</label>
+      <input id="oscrate" type="number" min="50" max="3276750" step="50" value="500">
+     </div>
+     <div>
+      <label for="osclen">Length (samples)</label>
+      <input id="osclen" type="number" min="10" max="1000" value="50">
+     </div>
+    </div>
+    <div class="row tight" style="margin-top:10px">
+     <button class="lime" id="oscapply">Apply channel/rate/length</button>
+     <button id="osccapture">Start capture</button>
+    </div>
+    <div class="scopehead" style="margin-top:14px">
+     <span>Showing: <b id="oscnow">&ndash;</b></span>
+     <span id="oscstate" class="dim"></span>
+    </div>
+    <div class="chartbox" id="chartbox"></div>
+   </div>
+
+  </div>
+
+  <div class="rail">
+   <div class="card" style="display:flex;flex-direction:column;flex:1">
+    <h2>Activity</h2>
+    <div class="log" id="log"></div>
+   </div>
+  </div>
+ </div>
+
+ <footer>MCSK BLDC + /IOTCONNECT &middot; polls every 3s</footer>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;");
+// This project's /IOTCONNECT solution is always AWS-hosted (see the main
+// README - the RNWF11 connects straight to an AWS IoT endpoint), so this
+// isn't something to ask each person signing in to type.
+const PLATFORM="aws";
+const S={token:null,solutionKey:null,env:null,device:null,commands:{},poll:null,
+        cand:{},hist:{},tv:{},ts:{},captureSig:null,lastCapture:null};
+
+/* ---------- theme ---------- */
+(function(){
+ try{const t=localStorage.getItem("dashTheme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}
+})();
+$("themebtn").onclick=()=>{
+ // The page's actual displayed theme with no data-theme set is always dark
+ // now (the unconditional CSS default - see the :root comment above), not
+ // whatever the OS prefers - matching that here, not re-deriving it from
+ // prefers-color-scheme (which used to be how dark was reached at all, and
+ // would otherwise make this button appear to do nothing on a light-OS
+ // visitor's first click).
+ const cur=document.documentElement.getAttribute("data-theme")||"dark";
+ const next=cur==="dark"?"light":"dark";
+ document.documentElement.setAttribute("data-theme",next);
+ try{localStorage.setItem("dashTheme",next);}catch(e){}
+};
+
+/* ---------- log ---------- */
+function log(m,cls){const d=document.createElement("div");
+ d.innerHTML='<span class="dim">'+new Date().toLocaleTimeString()+'</span> <span class="'+(cls||"")+'">'+m+'</span>';
+ $("log").prepend(d); while($("log").children.length>150)$("log").lastChild.remove();}
+
+/* ---------- api ---------- */
+async function api(p,o){o=o||{};o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
+ if(S.token)o.headers["Authorization"]="Bearer "+S.token;
+ // Unlike the bearer token, there's no server-side fallback for these - this
+ // Lambda holds no solution key of its own (see lambda_function.py's header
+ // comment), so every call after /login needs them, not just /login itself.
+ if(S.solutionKey)o.headers["X-Iotc-Solution-Key"]=S.solutionKey;
+ if(S.env)o.headers["X-Iotc-Env"]=S.env;
+ o.headers["X-Iotc-Pf"]=PLATFORM;
+ const r=await fetch("api/dash/"+p,o);const j=await r.json().catch(()=>({error:"bad response"}));
+ if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j;}
+
+/* ---------- auth ----------
+   Session bundle {token,solutionKey,env} lives in sessionStorage (cleared
+   when the tab closes) so a page refresh resumes without re-entering
+   anything - same as before this dashboard supported more than one
+   /IOTCONNECT account. If "remember" is checked at login, solutionKey/env
+   (never the password, never the token) are ALSO kept in localStorage, which
+   survives closing the browser, purely to pre-fill those two fields next
+   time - email/password/sign-in are still required fresh every session. */
+function prefillRemembered(){
+ try{
+  const r=JSON.parse(localStorage.getItem("dashRemember")||"null");
+  if(r){$("solkey").value=r.solutionKey||"";$("ioenv").value=r.env||"";
+   $("rememberme").checked=true;}
+ }catch(e){}
+}
+prefillRemembered();
+$("loginbtn").onclick=async()=>{
+ const email=$("email").value.trim(),password=$("password").value;
+ const solutionKey=$("solkey").value.trim(),env=$("ioenv").value.trim();
+ if(!solutionKey||!env){$("loginstatus").innerHTML='<span class="err">Enter your solution key and environment.</span>';return}
+ if(!email||!password){$("loginstatus").innerHTML='<span class="err">Enter your email and password.</span>';return}
+ $("loginbtn").disabled=true;$("loginstatus").innerHTML='Signing in&hellip;';
+ try{
+  const j=await api("login",{method:"POST",body:JSON.stringify({email,password,solutionKey,env,pf:PLATFORM})});
+  S.token=j.token;S.solutionKey=solutionKey;S.env=env;
+  sessionStorage.setItem("dashSession",JSON.stringify({token:S.token,solutionKey,env}));
+  if($("rememberme").checked)localStorage.setItem("dashRemember",JSON.stringify({solutionKey,env}));
+  else localStorage.removeItem("dashRemember");
+  await boot();
+ }catch(e){$("loginstatus").innerHTML='<span class="err">'+esc(e.message)+'</span>';$("loginbtn").disabled=false}};
+$("logout").onclick=()=>{sessionStorage.removeItem("dashSession");location.reload()};
+
+async function boot(){
+ let b;
+ try{b=await api("bootstrap");}
+ catch(e){$("loginstatus").innerHTML='<span class="err">'+esc(e.message)+'</span>';$("loginbtn").disabled=false;return}
+ if(!b.devices.length){$("loginstatus").innerHTML='<span class="err">No matching device on this account - '
+  +'check TEMPLATE_GUID in the Lambda if you expected to see one.</span>';$("loginbtn").disabled=false;return}
+ S.devices=b.devices;S.cmdsByTpl=b.commandsByTemplate||{};
+ $("devsel").innerHTML=S.devices.map((d,i)=>'<option value="'+i+'">'+esc(d.uniqueId)+'</option>').join("");
+ $("devsel").onchange=()=>selectDevice(+$("devsel").value);
+ $("loginview").classList.add("hidden");$("dash").classList.remove("hidden");
+ log("signed in &mdash; "+S.devices.length+" board(s) available","ok");
+ selectDevice(0);
+ if(!S.poll)S.poll=setInterval(refresh,3000);
+}
+function selectDevice(i){
+ S.device=S.devices[i];S.commands=S.cmdsByTpl[S.device.templateGuid]||{};
+ S.cand={};S.hist={};S.tv={};S.ts={};S.captureSig=null;S.lastCapture=null;
+ log("viewing board <b>"+esc(S.device.uniqueId)+"</b>","ok");
+ refresh();
+}
+(async function tryResume(){
+ let sess=null;
+ try{sess=JSON.parse(sessionStorage.getItem("dashSession")||"null");}catch(e){}
+ if(sess&&sess.token&&sess.solutionKey&&sess.env){
+  S.token=sess.token;S.solutionKey=sess.solutionKey;S.env=sess.env;
+  await boot();
+ }
+})();
+
+/* ---------- latching (mirrors the imx95 cockpit's latch(): the REST read is
+   eventually consistent, so a NOVEL value needs 2 consecutive polls to be
+   believed, a REVERSION to a previously-shown value needs 5 - stale
+   resurrection is far likelier than a real revert) ---------- */
+function latch(values,stamps){
+ for(const k in values){
+  const st=(stamps||{})[k]||"",nv=values[k];
+  if(!(k in S.ts)){S.tv[k]=nv;S.ts[k]=st;(S.hist[k]=S.hist[k]||{})[String(nv)]=1;continue}
+  if(st<S.ts[k])continue;
+  if(nv===S.tv[k]){S.ts[k]=st;delete S.cand[k];continue}
+  const need=(S.hist[k]&&S.hist[k][String(nv)])?5:2;
+  const c=S.cand[k];
+  if(c&&c.v===nv)c.n++;else S.cand[k]={v:nv,n:1};
+  if(S.cand[k].n>=need){S.tv[k]=nv;S.ts[k]=st;(S.hist[k]=S.hist[k]||{})[String(nv)]=1;delete S.cand[k];}
+ }
+ return Object.assign({},S.tv);
+}
+
+/* ---------- motor state / telemetry rendering ---------- */
+const STATES={0:"init",1:"waiting",2:"offset cal",3:"running",4:"reversing",5:"stopping",6:"FAULT"};
+// ic/im (requested/measured current) deliberately excluded: they're only ever
+// set by the firmware's CURRENT_PI_CLOSEDLOOP control mode, which this build
+// doesn't use (SPEED_PI_CLOSEDLOOP instead - see bldc_main.h) - they'd always
+// read 0 here, which is more confusing than useful. The real current data is
+// still available, just via the oscilloscope's bus/phase A/phase B channels.
+const TILES=[["run",v=>v==1?"yes":"no","Motor running"],
+            ["st",v=>STATES[v]||v,"State"],
+            ["sec",v=>v,"Commutation sector"],
+            ["rpm",v=>v,"Requested speed","rpm"],
+            ["spd",v=>v,"Measured speed","rpm"],
+            ["vdc",v=>(v*0.002176).toFixed(2),"Bus voltage","V"]];
+function gauge(pct){
+ const R=34,C=Math.PI*R,off=C*(1-Math.max(0,Math.min(1,pct/100)));
+ return '<svg width="92" height="56" viewBox="0 0 84 48">'+
+  '<path d="M8 44 A34 34 0 0 1 76 44" fill="none" stroke="var(--grid)" stroke-width="8" stroke-linecap="round"/>'+
+  '<path d="M8 44 A34 34 0 0 1 76 44" fill="none" stroke="var(--series-1)" stroke-width="8" stroke-linecap="round"'+
+  ' stroke-dasharray="'+C+'" stroke-dashoffset="'+off+'" style="transition:stroke-dashoffset .6s ease"/></svg>'+
+  '<div style="text-align:center;font-weight:700;font-variant-numeric:tabular-nums">'+pct.toFixed(1)+'<small style="color:var(--text-muted);font-size:.6em"> %</small></div>';
+}
+function renderTelemetry(v){
+ $("tiles").innerHTML=TILES.map(([k,fmt,label,unit])=>
+  '<div class="tile"><div class="k">'+esc(label)+'</div><div class="v">'
+  +esc(v[k]===undefined?"–":fmt(v[k]))+(unit?'<small>'+unit+'</small>':'')+'</div></div>').join("");
+ const dutyPct=v.duty!==undefined?100*v.duty/4999:0;   // PWM period = 4999 counts (LOOPTIME_TCY)
+ $("gauge").innerHTML=gauge(dutyPct);
+}
+
+/* ---------- commands ---------- */
+async function send(cmd,value){
+ const guid=S.commands[cmd];
+ if(!guid)throw new Error(`command "${cmd}" is not in this device's template`);
+ await api("command",{method:"POST",body:JSON.stringify({deviceGuid:S.device.guid,commandGuid:guid,value:value||""})});
+ log("sent <b>"+esc(cmd)+"</b>"+(value?" "+esc(value):""));
+}
+async function withBusy(btn,fn){
+ btn.disabled=true;const prev=btn.textContent;
+ try{await fn();btn.textContent="✓ sent";setTimeout(()=>{btn.textContent=prev;btn.disabled=false},900);}
+ catch(e){btn.textContent="failed";log(esc(e.message),"err");setTimeout(()=>{btn.textContent=prev;btn.disabled=false},1400);}
+}
+document.querySelectorAll("[data-cmd]").forEach(b=>b.onclick=()=>withBusy(b,()=>send(b.dataset.cmd)));
+$("speedbtn").onclick=()=>withBusy($("speedbtn"),async()=>{
+ // Same reasoning as the oscilloscope settings below: the firmware now
+ // rejects an out-of-range motor-speed outright (iotconnect_rnwf11.c), but
+ // that rejection is an async ack this dashboard doesn't read back, so the
+ // in-app error has to be caught here too, before the command is even sent.
+ const pct=requireInt($("speedval").value,0,100,"Speed","%");
+ await send("motor-speed",String(pct));
+});
+// Matches the real limits IOTC_RNWF11_OnCommand() enforces (iotconnect_rnwf11.c
+// - see SCOPE_RATE_US_MIN/MAX, SCOPE_LENGTH_MIN, SCOPE_BUFFER_MAX there) - the
+// firmware itself now REJECTS an out-of-range value outright rather than
+// silently clamping it, but that rejection is an async command ack this
+// dashboard doesn't currently read back, so a real in-app error has to be
+// caught here too, before the command is even sent, for the user to actually
+// see it. Thrown errors surface through withBusy()'s existing catch (the
+// button flashes "failed" and the message lands in the Activity log), same
+// as any other failed command.
+function requireInt(value,min,max,label,unit){
+ const s=String(value).trim();
+ if(!/^-?\d+$/.test(s))throw new Error(label+" must be a whole number.");
+ const n=parseInt(s,10);
+ if(n<min||n>max)throw new Error(label+" must be between "+min+" and "+max+(unit?" "+unit:"")+".");
+ return n;
+}
+$("oscapply").onclick=()=>withBusy($("oscapply"),async()=>{
+ const ch=requireInt($("oscch").value,0,4,"Channel");
+ const rate=requireInt($("oscrate").value,50,3276750,"Rate","µs");
+ const len=requireInt($("osclen").value,10,1000,"Length","samples");
+ await send("scope-channel",String(ch));
+ await send("scope-rate",String(rate));
+ await send("scope-length",String(len));
+});
+$("osccapture").onclick=()=>withBusy($("osccapture"),()=>send("scope-capture"));
+
+/* ---------- oscilloscope unit conversion - derived from the DM330031 board
+   schematic + firmware constants, documented in the main README's "Software
+   Oscilloscope" section. Keep these three constants in sync with that and with
+   scope_commands.h if the
+   hardware/firmware ever changes. ---------- */
+const ADC_LSB_V=3.3/65536;
+const VBUS_VOLTS_PER_COUNT=ADC_LSB_V*2*((34e3+34e3+3.3e3)/3.3e3);      // ~2.176 mV
+const AMPS_PER_COUNT=ADC_LSB_V/((4020/(62+470))*0.010);                // ~0.666 mA
+const PWM_PERIOD_COUNTS=4999;
+const CH_NAMES={0:"DC bus voltage",1:"PWM duty cycle",2:"Bus current",3:"Phase A current",4:"Phase B current"};
+function convert(ch,values){
+ if(ch===0)return{v:values.map(x=>x*VBUS_VOLTS_PER_COUNT),unit:"V",fmt:x=>x.toFixed(3)};
+ if(ch===1)return{v:values.map(x=>100*x/PWM_PERIOD_COUNTS),unit:"%",fmt:x=>x.toFixed(1)};
+ if(ch===2||ch===3||ch===4)return{v:values.map(x=>x*AMPS_PER_COUNT),unit:"A",fmt:x=>x.toFixed(3)};
+ return{v:values,unit:"",fmt:x=>String(x)};
+}
+
+/* ---------- oscilloscope chart (dataviz skill: single series -> no legend
+   needed, 2px line, hairline recessive gridlines, crosshair+tooltip, y-axis
+   ticks rounded) ---------- */
+function drawChart(capture,channel){
+ const box=$("chartbox");
+ if(!capture||!capture.t||!capture.t.length){box.innerHTML='<p class="dim" style="margin:6px 0">No capture yet &mdash; click <b>Start capture</b> above.</p>';return}
+ const {v,unit,fmt}=convert(channel,capture.v);
+ const t=capture.t;
+ const yTitle=(CH_NAMES[channel]||"Value")+(unit?" ("+unit+")":"");
+ const W=760,H=280,padL=66,padR=14,padT=14,padB=30;
+ const plotW=W-padL-padR,plotH=H-padT-padB;
+ const tMax=Math.max(1,t[t.length-1]);
+ const vMin=Math.min(...v),vMax=Math.max(...v);
+ const vPad=(vMax-vMin)*0.08||Math.abs(vMax||1)*0.08||1;
+ const yLo=vMin-vPad,yHi=vMax+vPad;
+ const x=i=>padL+plotW*(t[i]/tMax);
+ const y=val=>padT+plotH*(1-(val-yLo)/(yHi-yLo||1));
+ const span=tMax;
+ const [tUnit,tDiv]=span>=2e6?["s",1e6]:span>=2e3?["ms",1e3]:["us",1];
+ let path="M"+t.map((_,i)=>x(i).toFixed(1)+","+y(v[i]).toFixed(1)).join(" L");
+ const yTicks=5,gridlines=[],ylabels=[];
+ for(let i=0;i<=yTicks;i++){const val=yLo+(yHi-yLo)*i/yTicks,py=y(val);
+  gridlines.push('<line class="gridline" x1="'+padL+'" x2="'+(W-padR)+'" y1="'+py.toFixed(1)+'" y2="'+py.toFixed(1)+'"/>');
+  ylabels.push('<text class="tick" x="'+(padL-8)+'" y="'+(py+4).toFixed(1)+'" text-anchor="end">'+fmt(val)+'</text>');}
+ const xTicks=Math.min(6,t.length-1)||1,xlabels=[];
+ for(let i=0;i<=xTicks;i++){const frac=i/xTicks,px=padL+plotW*frac;
+  xlabels.push('<text class="tick" x="'+px.toFixed(1)+'" y="'+(H-padB+16)+'" text-anchor="middle">'+(tMax*frac/tDiv).toFixed(tDiv===1?0:1)+'</text>');}
+ box.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" id="chartsvg">'
+  +gridlines.join("")+ylabels.join("")+xlabels.join("")
+  +'<line class="axis" x1="'+padL+'" x2="'+(W-padR)+'" y1="'+(H-padB)+'" y2="'+(H-padB)+'"/>'
+  +'<text class="tick" x="'+(W/2)+'" y="'+(H-4)+'" text-anchor="middle">time ('+tUnit+')</text>'
+  +'<text class="tick" x="14" y="'+((padT+H-padB)/2)+'" text-anchor="middle" '
+  +'transform="rotate(-90 14 '+((padT+H-padB)/2)+')">'+esc(yTitle)+'</text>'
+  +'<path class="trace" d="'+path+'"/>'
+  +'<g id="xhairG" style="display:none"><line class="xhair" id="xhairLine"/><circle class="xdot" r="4" id="xhairDot"/></g>'
+  +'<rect class="overlay" x="'+padL+'" y="'+padT+'" width="'+plotW+'" height="'+plotH+'"/>'
+  +'</svg><div class="tooltip hidden" id="tooltip"></div>';
+ const svg=$("chartsvg"),tip=$("tooltip"),g=$("xhairG"),xl=$("xhairLine"),xd=$("xhairDot");
+ function nearest(px){let best=0,bd=Infinity;for(let i=0;i<t.length;i++){const d=Math.abs(x(i)-px);if(d<bd){bd=d;best=i}}return best}
+ function move(evt){
+  const rect=svg.getBoundingClientRect();
+  const px=(evt.clientX-rect.left)*(W/rect.width);
+  const i=nearest(px);
+  const cx=x(i),cy=y(v[i]);
+  xl.setAttribute("x1",cx);xl.setAttribute("x2",cx);xl.setAttribute("y1",padT);xl.setAttribute("y2",H-padB);
+  xd.setAttribute("cx",cx);xd.setAttribute("cy",cy);
+  g.style.display="";
+  tip.classList.remove("hidden");
+  tip.style.left=(cx/W*100)+"%";tip.style.top=(cy/H*100)+"%";
+  tip.innerHTML=(t[i]/tDiv).toFixed(tDiv===1?0:1)+" "+tUnit+" &mdash; <b>"+fmt(v[i])+" "+unit+"</b>";
+ }
+ svg.querySelector(".overlay").addEventListener("pointermove",move);
+ svg.querySelector(".overlay").addEventListener("pointerleave",()=>{g.style.display="none";tip.classList.add("hidden")});
+}
+
+/* ---------- refresh loop ---------- */
+async function refresh(){
+ try{
+  const t=await api("telemetry?guid="+encodeURIComponent(S.device.guid)
+                    +"&duid="+encodeURIComponent(S.device.uniqueId));
+  const v=latch(t.values||{},t.stamps);
+  renderTelemetry(v);
+  const fresh=t.age_s!==null&&t.age_s!==undefined&&t.age_s<45;
+  $("livepill").textContent=fresh?"live":(t.age_s==null?"no data":"stale "+Math.round(t.age_s)+"s");
+  $("livepill").className="pill "+(fresh?"live":"dead");
+
+  // The backend's history read is a ROLLING window (now-10min to now, not
+  // "since the capture started") - a capture's chunks are published a few
+  // seconds apart, so as the window slides forward its EARLIEST chunk
+  // (osc_seq=1) ages out first, then the rest follow - the chart would
+  // visibly lose its early samples, then disappear entirely a few chunks
+  // later, purely because of how far back we happen to be querying, with
+  // nothing wrong with the capture itself. A finished capture should just
+  // stay shown until a newer one replaces it, the same way a real
+  // oscilloscope keeps its last trace on screen - so once a real capture is
+  // seen, it's kept (S.lastCapture) regardless of what a later poll's
+  // shrinking window returns; only a NEW capture (a non-null t.capture)
+  // ever overwrites it.
+  if(t.capture)S.lastCapture=t.capture;
+  const cap=S.lastCapture;
+  // Channel/rate come from the capture ITSELF (cap.channel/cap.rate_us - see
+  // reconstruct_capture() in lambda_function.py), not the separately-polled
+  // osc_ch/osc_rate telemetry (v.osc_ch/v.osc_rate): that value is latched
+  // (see latch() above - by design, needs a couple of polls to confirm a
+  // change, since it's meant for smoothing noisy sensor readings) and, worse,
+  // reflects whatever the CURRENT setting is - which can already differ from
+  // whichever channel this specific capture was actually taken on. Pairing
+  // "now" metadata with "then" data was a real mismatch (e.g. showing "PWM
+  // duty cycle" right after switching to phase A current, while the graph
+  // already had the new channel's data), not just a display lag. v.osc_ch is
+  // kept only as a last-resort fallback for the rare case a capture has no
+  // settings message in the lookback window at all (cap.channel then null).
+  const ch=cap?(cap.channel!==null&&cap.channel!==undefined?cap.channel:(v.osc_ch!==undefined?+v.osc_ch:0)):0;
+  const rateUs=cap?(cap.rate_us!==null&&cap.rate_us!==undefined?cap.rate_us:v.osc_rate):undefined;
+  // "none" is a sentinel distinct from any real signature and from the
+  // initial S.captureSig (null) - so the very first poll, even with no
+  // capture yet, still renders the chartbox's "no capture yet" placeholder
+  // exactly once, the same as a real capture change would.
+  //
+  // n/seq_seen/t.length alone used to be the signature, but two DIFFERENT
+  // captures taken with the same channel/rate/length settings produce
+  // identical values for all three (e.g. always 12 chunks for a 50-sample
+  // capture) - the chart and the "Showing" title would then never update for
+  // a second capture, or for a channel/rate change with no new capture yet.
+  // Fold in the channel, rate, and the actual sampled values (essentially
+  // never identical between two real captures) so any real change - a new
+  // capture, a settings change, or both - is always detected.
+  const sig=cap?(ch+"/"+(rateUs||"")+"/"+cap.n+"/"+cap.seq_seen+"/"+cap.v.join(",")):"none";
+  if(sig!==S.captureSig){
+   S.captureSig=sig;
+   if(cap){
+    $("oscnow").textContent=(CH_NAMES[ch]||"channel "+ch)+" — "+(rateUs??"?")+" µs/sample";
+    $("oscstate").textContent=cap.complete
+      ?("complete — "+cap.t.length+" samples")
+      :("filling — chunk "+cap.seq_seen+" of "+cap.n);
+    if(cap.complete)log("scope capture ready: <b>"+cap.t.length+"</b> samples, channel "+ch,"ok");
+   }else{
+    $("oscnow").textContent="–";$("oscstate").textContent="";
+   }
+   drawChart(cap,ch);
+  }
+ }catch(e){
+  $("livepill").textContent="error";$("livepill").className="pill dead";
+  log(esc(e.message),"err");
+ }
+}
+</script>
+</div></body></html>

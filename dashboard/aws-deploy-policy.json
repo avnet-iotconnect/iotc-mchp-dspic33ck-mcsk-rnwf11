@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DashboardServerless",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*",
+        "apigateway:*",
+        "logs:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DashboardLambdaRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:PutRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:PassRole",
+        "iam:CreatePolicy",
+        "iam:TagRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/mcsk-dashboard-*",
+        "arn:aws:iam::*:policy/mcsk-dashboard-*"
+      ]
+    }
+  ]
+}

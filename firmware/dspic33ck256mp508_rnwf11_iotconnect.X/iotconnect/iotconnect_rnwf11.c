@@ -923,24 +923,18 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
     else if (strcmp(command, "motor-speed") == 0)
     {
         char *endptr = NULL;
-        long percent = (arg != NULL) ? strtol(arg, &endptr, 10) : 0;
-        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0'))
+        long percent = (arg != NULL) ? strtol(arg, &endptr, 10) : -1;
+        /* Rejected outright rather than accepted-and-silently-clamped - same
+         * reasoning as the scope-rate/scope-length fix above: a value outside
+         * 0-100 used to be accepted with an "ok" ack and quietly forced to 0
+         * or 100, indistinguishable from that value being honored. */
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (percent < 0) || (percent > 100))
         {
             status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "motor-speed requires an integer 0-100 percent argument";
+            message = "motor-speed requires an integer between 0 and 100 (percent)";
         }
         else
         {
-            /* Clamp before the uint8_t cast below - clamping after would let
-             * an out-of-range value (e.g. 300) wrap modulo 256 instead. */
-            if (percent < 0)
-            {
-                percent = 0;
-            }
-            else if (percent > 100)
-            {
-                percent = 100;
-            }
             MCAPP_MotorSetSpeedPercent((uint8_t)percent);
         }
     }
@@ -956,41 +950,56 @@ static void IOTC_RNWF11_OnCommand(IotclC2dEventData data)
         else
         {
             SCOPE_SetChannel((uint8_t)channel);
+            /* Otherwise osc_ch/osc_rate/osc_len only reach /IOTCONNECT on the
+             * next periodic tick (up to IOTC_TELEMETRY_PERIOD_MS later - the
+             * dashboard's "Showing" title/axis label were seen lagging a
+             * command by many seconds because of this gap, not anything on
+             * the dashboard side). Commands only run here when the queue is
+             * draining, which only happens with scopeTxState == SCOPE_TX_IDLE
+             * (see Task()), so this never competes with an in-progress
+             * capture's own chunk publishes. */
+            (void)IOTC_RNWF11_PublishScopeSettings();
         }
     }
     else if (strcmp(command, "scope-rate") == 0)
     {
         char *endptr = NULL;
         long microseconds = (arg != NULL) ? strtol(arg, &endptr, 10) : 0;
-        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (microseconds < 1))
+        /* Rejected outright rather than accepted-and-silently-clamped: a
+         * value outside [SCOPE_RATE_US_MIN, SCOPE_RATE_US_MAX] used to be
+         * accepted with an "ok" ack and quietly forced to a different rate
+         * than what was actually asked for - indistinguishable, from the
+         * caller's side, from the value being honored. */
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') ||
+            (microseconds < (long)SCOPE_RATE_US_MIN) || (microseconds > (long)SCOPE_RATE_US_MAX))
         {
             status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "scope-rate requires a positive integer (microseconds)";
+            message = "scope-rate requires an integer between 50 and 3276750 (microseconds)";
         }
         else
         {
             SCOPE_SetRateMicroseconds((uint32_t)microseconds);
+            (void)IOTC_RNWF11_PublishScopeSettings(); /* see scope-channel's comment above */
         }
     }
     else if (strcmp(command, "scope-length") == 0)
     {
         char *endptr = NULL;
         long samples = (arg != NULL) ? strtol(arg, &endptr, 10) : 0;
-        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') || (samples < 1))
+        /* Rejected outright rather than accepted-and-silently-clamped - same
+         * reasoning as scope-rate above. Both bounds checked here (not left
+         * to SCOPE_SetLength()'s own internal clamp), so an out-of-range
+         * value never reaches it having been silently retargeted. */
+        if ((arg == NULL) || (endptr == arg) || (*endptr != '\0') ||
+            (samples < (long)SCOPE_LENGTH_MIN) || (samples > (long)SCOPE_BUFFER_MAX))
         {
             status = IOTCL_C2D_EVT_CMD_FAILED;
-            message = "scope-length requires a positive integer (samples, clamped to 10-1000)";
+            message = "scope-length requires an integer between 10 and 1000 (samples)";
         }
         else
         {
-            /* Clamp before the uint16_t cast below, same reasoning as
-             * motor-speed's clamp-before-cast above - an out-of-range value
-             * (e.g. 70000) would otherwise wrap modulo 65536. */
-            if (samples > SCOPE_BUFFER_MAX)
-            {
-                samples = SCOPE_BUFFER_MAX;
-            }
             SCOPE_SetLength((uint16_t)samples);
+            (void)IOTC_RNWF11_PublishScopeSettings(); /* see scope-channel's comment above */
         }
     }
     else if (strcmp(command, "scope-capture") == 0)
@@ -1313,7 +1322,15 @@ void IOTC_RNWF11_Task(void)
         c2dQueueHead = (uint8_t)((head + 1U) % IOTC_RNWF11_C2D_QUEUE_LEN);
         c2dQueueCount--;
     }
-    if (telemetryMilliseconds >= IOTC_TELEMETRY_PERIOD_MS)
+    /* Also held back while a capture is actively sending its chunks (same
+     * reasoning as the C2D queue above): this periodic block used to fire
+     * unconditionally, interleaving the main telemetry and scope-settings
+     * publishes into the same ack-serialized publish stream a capture's
+     * chunks depend on - not the direct cause of any specific stall seen so
+     * far, but real, avoidable contention. telemetryMilliseconds is only
+     * reset once the publish actually happens, so it fires the instant the
+     * capture frees up rather than waiting out a whole extra period. */
+    if ((telemetryMilliseconds >= IOTC_TELEMETRY_PERIOD_MS) && (scopeTxState == SCOPE_TX_IDLE))
     {
         telemetryMilliseconds = 0;
         if (!mqttLinkUp)

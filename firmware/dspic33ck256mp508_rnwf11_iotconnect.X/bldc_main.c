@@ -209,8 +209,12 @@ void MCAPP_MotorSetSpeedPercent(uint8_t percent)
  *              stopped writing), so no locking is needed - the same pattern
  *              mcappData itself already relies on elsewhere in this file.
  *****************************************************************************/
+// SCOPE_LENGTH_MIN lives in scope_commands.h now (shared with
+// IOTC_RNWF11_OnCommand()'s validation - see its comment there). Ticks here
+// are an internal detail; SCOPE_RATE_TICKS_MIN=1 and the 0xFFFFU clamp below
+// are what SCOPE_RATE_US_MIN/MAX in that header are computed FROM - if either
+// changes here, update that header's pair to match.
 #define SCOPE_RATE_TICKS_MIN  1U
-#define SCOPE_LENGTH_MIN      10U
 #define SCOPE_ADC_TICK_US     LOOPTIME_MICROSEC // 50us per HAL_MC1ADCInterrupt() call
 
 static volatile bool scopeArmed;

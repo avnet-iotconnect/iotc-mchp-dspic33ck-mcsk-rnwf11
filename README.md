@@ -293,8 +293,33 @@ every 10 seconds:
 (`run` = motor running, `st` = state machine state, `sec` = commutation
 sector, `rpm`/`spd` = requested/measured speed, `ic`/`im` = requested/measured
 current, `duty` = PWM duty cycle, `vdc` = DC bus voltage ADC reading - multiply by
-0.002176 for volts, e.g. 11064 is about 24.1 V.) Watch it
-arrive on the device's **Live Data** tab in the /IOTCONNECT console.
+0.002176 for volts, e.g. 11064 is about 24.1 V.) You can watch it
+arrive on the device's **Live Data** tab in the /IOTCONNECT console, but the
+web dashboard below is the recommended way to see it.
+
+### Using the Web Dashboard
+
+<img src="media/dashboard-example.png" width="700"/>
+
+You can use this AWS-hosted dashboard to view telemetry live, send motor/oscilloscope
+commands, and plot scope capture as a charts. Open
+[the dashboard](https://7qh4y68kpa.execute-api.us-east-1.amazonaws.com) and
+sign in with your own /IOTCONNECT solution key, environment, email, and
+password (each person uses their own /IOTCONNECT login - nothing is shared or
+stored beyond your signed-in session).
+
+From there:
+- The **telemetry** panel shows the fields above, live, updating every few
+  seconds.
+- The **motor control** panel sends `motor-start`/`stop`/`reverse`/`speed` -
+  see the table below for what each does.
+- The **oscilloscope** panel sets the channel/rate/length (see below for what
+  they mean and good starting values), triggers a capture, and plots the
+  result as soon as it's done publishing - no copying chunk lines anywhere.
+
+> [!NOTE]
+> This dashboard is already deployed and hosted - you don't need an AWS account
+> or any setup to use it.
 
 The current oscilloscope settings publish as their own small message, on the
 same 10-second cadence, right after the message above:
@@ -308,11 +333,11 @@ above - see [Software Oscilloscope](#software-oscilloscope) below for why.
 
 ### Motor Control Commands
 
-The motor behavior is primarily driven by /IOTCONNECT C2D commands, but **SW1** on the board itself can be 
-used to toggle the motor power manually. SW1 is handled in the motor control interrupt, so
-it responds immediately whatever else the firmware is doing - including while it is
-connecting to Wi-Fi or the broker, or publishing a scope capture - which makes it the
-reliable local stop if the internet connection drops.
+The motor behavior is primarily driven by /IOTCONNECT C2D commands - sent from
+the dashboard's buttons, or from the /IOTCONNECT console directly - but **SW1**
+on the board itself can be used to toggle the motor power manually. SW1 is handled 
+in the motor control interrupt, so it responds immediately whatever else the firmware 
+is doing.
 
 Commands that arrive while a scope capture is being published are queued (up to 4)
 and run, in order, once the capture has finished, so they can't disturb the capture.
@@ -326,29 +351,38 @@ acknowledgement is sent later with the rest of the queue.
 | `motor-reverse` | none               | Reverses motor direction                        |
 | `motor-speed`   | integer, `0`-`100` | Sets speed as a percent of max RPM (default 50%) |
 
+A `motor-speed` value outside `0`-`100` is **rejected** (the ack comes back
+failed, with a message giving the valid range) rather than silently clamped
+to `0` or `100` - same reasoning as the scope settings below. The dashboard's
+speed field checks this client-side too, so an out-of-range value is caught
+immediately with an on-screen error instead of a round trip to the device.
+
 ### Software Oscilloscope
 
 The firmware can capture one motor signal into a buffer at a configurable
 rate and publish it to /IOTCONNECT as two parallel arrays (elapsed time and
-value) - a lightweight, purpose-built alternative to Microchip's X2Cscope
-(which is designed to be driven by its own PC-side tool over a dedicated
-serial link, not by cloud commands - see the design notes in
-`iotconnect/iotconnect_rnwf11.c` above `IOTC_RNWF11_PublishScopeData()` if
-curious). It's a one-shot "single sweep" capture, not a continuous trigger.
+value). It's a one-shot "single sweep" capture, not a continuous trigger.
+The dashboard's oscilloscope panel is the recommended way to configure and
+trigger a capture and see the result plotted.
+
+The commands below are the
+same ones its buttons send, given here for reference (and for sending
+directly from the /IOTCONNECT console).
 
 | Command          | Parameter           | Effect                                      |
 |------------------|---------------------|----------------------------------------------|
 | `scope-channel`  | integer, `0`-`4`    | Selects the signal to capture: `0`=DC bus voltage (default), `1`=PWM duty cycle, `2`=bus current, `3`=phase A current, `4`=phase B current |
-| `scope-rate`     | integer (µs)        | Sample period in microseconds, rounded to the nearest 50µs (the motor control loop's tick rate); default 500µs (2kHz) |
+| `scope-rate`     | integer, `50`-`3276750` (µs) | Sample period in microseconds, rounded to the nearest 50µs (the motor control loop's tick rate); default 500µs (2kHz) |
 | `scope-length`   | integer, `10`-`1000` | Number of samples per capture; default 50 (a 25ms window at the default rate) |
 | `scope-capture`  | none                | Starts a new capture using the current channel/rate/length settings |
 
-The default rate/length aren't arbitrary: this motor's `MAX_MOTORSPEED` (4600
-RPM) and `POLEPAIRS` (2) put one electrical revolution at ~6.5ms at max speed
-(~13ms at the 50%-speed boot default) - 500µs/sample resolves each electrical
-cycle's shape (~13-26 samples/cycle) rather than just a Nyquist-minimum
-zigzag, while 50 samples spans several full cycles at any speed the motor
-actually runs at.
+A value outside a command's range is **rejected** (the ack comes back failed,
+with a message giving the valid range) rather than silently rounded to the
+nearest limit - so a mistyped `scope-length 5000` never quietly becomes a
+1000-sample capture without you knowing.
+
+The default rate/length are set to match expected conditions for the included motor,
+but users are encouraged to tinker with different settings to achieve the captures they need.
 
 Once a capture fills its buffer, the firmware publishes it (independent of
 the normal 10-second telemetry cadence) as a series of **chunks**, sent back to
@@ -362,23 +396,19 @@ back, each carrying a slice of the two arrays:
 
 `osc_seq` is the 1-based chunk number and `osc_n` the total chunk count, so the
 capture is complete once `osc_seq` equals `osc_n`; concatenate the `osc_t` and
-`osc_v` arrays in `osc_seq` order to rebuild it. Both arrays are
-`STRING`-typed attributes carrying a bracketed array of numbers as text (not raw
-JSON arrays - the device template's `OBJECT` type doesn't support arrays), meant
+`osc_v` arrays in `osc_seq` order to rebuild it. 
+
+Both arrays are `STRING`-typed attributes carrying a bracketed array of numbers as text, meant
 to be parsed back into numbers on the consuming end. `osc_t` is elapsed
 microseconds since the capture started (`osc_rate * sample index`); `osc_v` is
 the raw value of the selected channel at each point, in the same units as that
-channel's regular telemetry field (`vdc`/`duty` for channels 0/1). The bus and
-phase current channels are raw ADC counts (the telemetry `im` field is always
-0 - see the telemetry field notes above). Measured speed is intentionally not a
-scope channel: it only updates once per electrical revolution, far too slowly to
-be worth capturing - use the `spd` telemetry field for it.
+channel's regular telemetry field (`vdc`/`duty` for channels 0/1). 
 
-#### Converting to engineering units
+#### Converting to Engineering Units
 
-Values published by the device are raw; [plot_scope_capture.py](tools/plot_scope_capture.py)
-converts them using this board's actual component values (from the DM330031
-schematic and the firmware):
+Values published by the device are raw; the dashboard converts them using this
+board's actual component values (from the DM330031 schematic and the
+firmware) before plotting:
 
 | Channel | Conversion | Basis |
 |---|---|---|
@@ -388,18 +418,16 @@ schematic and the firmware):
 
 The firmware does no current offset calibration, so with zero current the
 current channels read a small non-zero value (amplifier and reference
-tolerance). To zero them, capture a current channel with the motor stopped and
-pass the mean raw value to the plot script as `--offset`.
+tolerance). The dashboard plots the raw conversion as-is.
 
-#### Suggested capture settings
+#### Suggested Capture Settings
 
 This kit's motor runs from 24 V with 2 pole pairs and a 4600 RPM maximum
 (`bldc_main.h`), so the electrical frequency is `RPM / 60 x 2` and one electrical
 cycle is `6e7 / (RPM x 2)` us. Six-step commutation changes step six times per
 electrical cycle. The sample period floor is 50 us (the 20 kHz PWM), and a capture
 holds 10 to 1000 samples. A few hundred samples is plenty for these windows (the
-table uses 100); longer captures cost publish time (see the note below). Choose
-the rate so the window covers about one to one and a half electrical cycles:
+table uses 100). Choose the rate so the window covers about one to one and a half electrical cycles:
 
 | Motor speed | Electrical cycle | One commutation step | Rate for phase / bus current | Window (100 samples) |
 |---|---|---|---|---|
@@ -418,31 +446,22 @@ For what to look at:
 | Start-up inrush | 2 | 20 ms | 100 | 2 s | Send `scope-capture`, then `motor-start`. |
 
 The scope samples one channel per capture and has no trigger, so two channels
-can't be compared for timing (for example the phase relationship of phase A
-against phase B): two captures have no common time reference. The ADC is sampled
-once per PWM period, so PWM switching ripple is not visible.
+can't be compared for timing because two captures have no common time reference. 
+The ADC is sampled once per PWM period, so PWM switching ripple is not visible.
 
-To look at a capture, copy the chunk lines from the device's **Live Data** tab
-into a text file and run:
-
-```
-python3 tools/plot_scope_capture.py live_data.txt            # opens a plot window
-python3 tools/plot_scope_capture.py live_data.txt --out capture.png
-```
-
-[plot_scope_capture.py](tools/plot_scope_capture.py) ignores unrelated lines,
-puts the chunks back together in `osc_seq` order (whichever order the console
-listed them in), reports incomplete captures, and plots the last complete one
-(`--list` and `--index` pick another). It needs `matplotlib`
-(`pip install matplotlib`).
+To look at a capture, send `scope-capture` from the dashboard (or the
+/IOTCONNECT console) and watch it appear in the dashboard's oscilloscope
+panel. It reassembles the chunks in `osc_seq` order and plots them
+automatically once the capture is complete, with no manual copying of
+anything. See [Using the Web Dashboard](#using-the-web-dashboard) above.
 
 > [!NOTE]
-> Chunking exists because of two limits found on real hardware: the RNWF11
-> rejects any `AT+MQTTPUB` command line longer than **195 bytes** (including
+> Chunking exists because of two limits found on the RNWF11.
+> It rejects any `AT+MQTTPUB` command line longer than **195 bytes** (including
 > the topic and the trailing `\r\n`) with `"Invalid Parameter"`, and it rejects
 > a publish sent while the previous one is still waiting for its `+MQTTPUBACK`
 > (`"MQTT Error"`), so the firmware waits for each ack before sending the next
-> message. That works out to roughly 4-5 samples per chunk - about 10 chunks
+> message. That works out to roughly 4-5 samples per chunk which is about 10 chunks
 > for the default 50 samples, about 20 for 100, and 200-330 for the
 > 1000-sample maximum (each chunk is one /IOTCONNECT message). Each chunk takes
 > about 60-130 ms to be acknowledged, so a 100-sample capture publishes in a
@@ -456,6 +475,7 @@ listed them in), reports incomplete captures, and plots the last complete one
 
 ## 10. Resources
 
+- [dashboard/README.md](dashboard/README.md) - the web dashboard's own documentation (architecture, design decisions) for whoever maintains or redeploys it - not needed just to use it
 - [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotconnect.X/docs) - Microchip's motor-control reference application this quickstart is built on
 - [iotc-mchp-dspic33-curosity-rnwf11](https://github.com/avnet-iotconnect/iotc-mchp-dspic33-curosity-rnwf11) - a related /IOTCONNECT quickstart for the dsPIC33AK512MPS512 Curiosity board, using the same RNWF11 add-on board
 - [RNWF11 UART to Cloud Add-on Board User's Guide](https://ww1.microchip.com/downloads/aemDocuments/documents/WSG/ProductDocuments/UserGuides/RNWF11-UART-to-Cloud-Add-on-Board-User-Guide-DS50003638.pdf)

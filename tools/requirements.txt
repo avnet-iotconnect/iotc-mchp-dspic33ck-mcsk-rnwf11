@@ -1,4 +1,3 @@
 pyserial
 xmodem
 iotconnect-sdk-lite
-matplotlib  # only needed by plot_scope_capture.py
