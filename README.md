@@ -318,7 +318,7 @@ From there:
   result as soon as it's done publishing - no copying chunk lines anywhere.
 
 > [!NOTE]
-> This dashboard is already deployed and hosted - you don't need an AWS account
+> This dashboard is already deployed and hosted. You don't need an AWS account
 > or any setup to use it.
 
 The current oscilloscope settings publish as their own small message, on the
@@ -353,7 +353,7 @@ acknowledgement is sent later with the rest of the queue.
 
 A `motor-speed` value outside `0`-`100` is **rejected** (the ack comes back
 failed, with a message giving the valid range) rather than silently clamped
-to `0` or `100` - same reasoning as the scope settings below. The dashboard's
+to `0` or `100`. The dashboard's
 speed field checks this client-side too, so an out-of-range value is caught
 immediately with an on-screen error instead of a round trip to the device.
 
@@ -378,8 +378,7 @@ directly from the /IOTCONNECT console).
 
 A value outside a command's range is **rejected** (the ack comes back failed,
 with a message giving the valid range) rather than silently rounded to the
-nearest limit - so a mistyped `scope-length 5000` never quietly becomes a
-1000-sample capture without you knowing.
+nearest limit.
 
 The default rate/length are set to match expected conditions for the included motor,
 but users are encouraged to tinker with different settings to achieve the captures they need.
