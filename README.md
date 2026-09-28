@@ -19,14 +19,15 @@ current, duty cycle, etc.) to /IOTCONNECT every 10 seconds.
 
 1. [Prerequisites](#1-prerequisites)
 2. [Get the Quickstart Source](#2-get-the-quickstart-source)
-3. [Import the Device Template](#3-import-the-device-template)
-4. [Generate and Upload the Device Certificate](#4-generate-and-upload-the-device-certificate)
-5. [Create the Device in /IOTCONNECT](#5-create-the-device-in-iotconnect)
-6. [Mount the RNWF11 on the Starter Kit](#6-mount-the-rnwf11-on-the-starter-kit)
-7. [Configure the Firmware](#7-configure-the-firmware)
-8. [Build the Firmware](#8-build-the-firmware)
-9. [Flash and Run the Demo](#9-flash-and-run-the-demo)
-10. [Resources](#10-resources)
+3. [Cloud Account Setup](#3-cloud-account-setup)
+4. [Import the Device Template](#4-import-the-device-template)
+5. [Generate and Upload the Device Certificate](#5-generate-and-upload-the-device-certificate)
+6. [Create the Device in /IOTCONNECT](#6-create-the-device-in-iotconnect)
+7. [Mount the RNWF11 on the Starter Kit](#7-mount-the-rnwf11-on-the-starter-kit)
+8. [Configure the Firmware](#8-configure-the-firmware)
+9. [Build the Firmware](#9-build-the-firmware)
+10. [Flash and Run the Demo](#10-flash-and-run-the-demo)
+11. [Resources](#11-resources)
 
 ## 1. Prerequisites
 
@@ -66,7 +67,23 @@ git submodule update --init --recursive
 
 See [tools/](tools/) for the provisioning scripts you'll use in the next few steps.
 
-## 3. Import the Device Template
+## 3. Cloud Account Setup
+
+An /IOTCONNECT account with an **AWS backend** is required. If you need to create an account, a
+**free trial subscription** is available — no credit card required:
+
+- Sign
+  up: [https://subscription.iotconnect.io/subscribe?cloud=aws](https://subscription.iotconnect.io/subscribe?cloud=aws)
+  (see
+  the [AWS Marketplace option](https://github.com/avnet-iotconnect/avnet-iotconnect.github.io/blob/main/documentation/iotconnect/subscription/iotconnect_aws_marketplace.md)
+  if you prefer)
+- Log in: [https://console.iotconnect.io/login](https://console.iotconnect.io/login)
+
+> [!NOTE]
+> Be sure to check your SPAM folder for the temporary password after registering if you don't see
+> it after a couple of minutes.
+
+## 4. Import the Device Template
 
 This demo publishes live motor telemetry and accepts motor control commands -
 import [`templates/dspic33MC-template.json`](templates/dspic33MC-template.json).
@@ -90,7 +107,7 @@ import [`templates/dspic33MC-template.json`](templates/dspic33MC-template.json).
 
    <img src="media/import-button.png" width="300"/>
 
-## 4. Generate and Upload the Device Certificate
+## 5. Generate and Upload the Device Certificate
 
 The RNWF11 board has its own USB-C port and power-select jumper
 (`PC3V3` / `HOST3V3`), independent of the starter kit - this step uses it
@@ -102,7 +119,7 @@ your PC.
 <table>
   <tr>
     <td align="center"><img src="media/jumper-flashing.png" width="270"><br><b>PC3V3</b> - flashing/provisioning (this step)</td>
-    <td align="center"><img src="media/jumper-running.png" width="280"><br><b>HOST3V3</b> - normal operation (Step 6)</td>
+    <td align="center"><img src="media/jumper-running.png" width="280"><br><b>HOST3V3</b> - normal operation (Step 7)</td>
   </tr>
 </table>
 
@@ -164,7 +181,7 @@ filesystem via `AT+FS`. You'll paste the printed device certificate into the
 > [!NOTE]
 > This can take up to 60 seconds to finish depending on your host PC environment.
 
-## 5. Create the Device in /IOTCONNECT
+## 6. Create the Device in /IOTCONNECT
 
 1. After logging into your /IOTCONNECT account on
    [console.iotconnect.io](https://console.iotconnect.io), go to the
@@ -187,7 +204,7 @@ filesystem via `AT+FS`. You'll paste the printed device certificate into the
    <img src="media/select-entity.png" width="400"/>
 
 4. Select the template you imported earlier in
-   [Step 3](#3-import-the-device-template):
+   [Step 4](#4-import-the-device-template):
 
    <img src="media/template-select.png" width="500"/>
 
@@ -198,7 +215,7 @@ filesystem via `AT+FS`. You'll paste the printed device certificate into the
 
 6. Click **Save & View**.
 
-## 6. Mount the RNWF11 on the Starter Kit
+## 7. Mount the RNWF11 on the Starter Kit
 
 Move the RNWF11's power jumper back to **HOST3V3**.
 
@@ -209,7 +226,7 @@ Move the RNWF11's power jumper back to **HOST3V3**.
 
 <img src="media/mcsk-rnwf-connection.png" width="400"/>
 
-## 7. Configure the Firmware
+## 8. Configure the Firmware
 
 `provision_device_config.py`/`.ps1` resolves your device's /IOTCONNECT MQTT
 connection info via /IOTCONNECT's discovery/identity API, then writes it -
@@ -257,7 +274,7 @@ Set-Location ..
 > without rebuilding. It's optional; omit it and the script only updates the
 > header file above.
 
-## 8. Build the Firmware
+## 9. Build the Firmware
 
 In MPLAB X:
 
@@ -265,11 +282,11 @@ In MPLAB X:
 2. Clean and Build. The output `.hex` lands in
    `bldc.X/dist/default/production/`.
 
-## 9. Flash and Run the Demo
+## 10. Flash and Run the Demo
 
 Connect the board's power supply, and connect the included micro-USB cable
 between your PC and the board's **PKOB4** port. The RNWF11 stays mounted
-from Step 6.
+from Step 7.
 
 <img src="media/mcsk-connections-flash.png" width="500"/>
 
@@ -472,7 +489,7 @@ anything. See [Using the Web Dashboard](#using-the-web-dashboard) above.
 > see above), and a capture is abandoned if the broker connection drops
 > partway through.
 
-## 10. Resources
+## 11. Resources
 
 - [dashboard/README.md](dashboard/README.md) - the web dashboard's own documentation (architecture, design decisions) for whoever maintains or redeploys it - not needed just to use it
 - [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotconnect.X/docs) - Microchip's motor-control reference application this quickstart is built on
