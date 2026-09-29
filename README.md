@@ -24,10 +24,11 @@ current, duty cycle, etc.) to /IOTCONNECT every 10 seconds.
 5. [Generate and Upload the Device Certificate](#5-generate-and-upload-the-device-certificate)
 6. [Create the Device in /IOTCONNECT](#6-create-the-device-in-iotconnect)
 7. [Mount the RNWF11 on the Starter Kit](#7-mount-the-rnwf11-on-the-starter-kit)
-8. [Configure the Firmware](#8-configure-the-firmware)
-9. [Build the Firmware](#9-build-the-firmware)
-10. [Flash and Run the Demo](#10-flash-and-run-the-demo)
-11. [Resources](#11-resources)
+8. [Connect the Motor](#8-connect-the-motor)
+9. [Configure the Firmware](#9-configure-the-firmware)
+10. [Build the Firmware](#10-build-the-firmware)
+11. [Flash and Run the Demo](#11-flash-and-run-the-demo)
+12. [Resources](#12-resources)
 
 ## 1. Prerequisites
 
@@ -226,7 +227,40 @@ Move the RNWF11's power jumper back to **HOST3V3**.
 
 <img src="media/mcsk-rnwf-connection.png" width="400"/>
 
-## 8. Configure the Firmware
+## 8. Connect the Motor
+
+With the board unpowered, connect the included motor's wires to the board's
+two green terminal blocks following the pinout below from
+Microchip's [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotconnect.X/docs).
+
+1. Connect the 3 thick phase wires to connector **J14**:
+
+   | J14 terminal | Wire color |
+   |---|---|
+   | PHA | White |
+   | PHB | Blue |
+   | PHC | Green |
+
+   <img src="media/motor-phase-wiring.png" width="400"/>
+
+2. Connect the 5 thin Hall sensor wires to connector **J7**:
+
+   | J7 terminal | Wire color |
+   |---|---|
+   | 5V | Red |
+   | GND | Black |
+   | HA | White |
+   | HB | Blue |
+   | HC | Green |
+
+   <img src="media/motor-hall-wiring.png" width="450"/>
+
+> [!NOTE]
+> The motor's wires may not all comfortably reach their terminals depending
+> on how your board and motor are positioned - you may need to solder on
+> extensions for some of them.
+
+## 9. Configure the Firmware
 
 `provision_device_config.py`/`.ps1` resolves your device's /IOTCONNECT MQTT
 connection info via /IOTCONNECT's discovery/identity API, then writes it -
@@ -274,7 +308,7 @@ Set-Location ..
 > without rebuilding. It's optional; omit it and the script only updates the
 > header file above.
 
-## 9. Build the Firmware
+## 10. Build the Firmware
 
 In MPLAB X:
 
@@ -282,13 +316,13 @@ In MPLAB X:
 2. Clean and Build. The output `.hex` lands in
    `bldc.X/dist/default/production/`.
 
-## 10. Flash and Run the Demo
+## 11. Flash and Run the Demo
 
 Connect the board's power supply, and connect the included micro-USB cable
 between your PC and the board's **PKOB4** port. The RNWF11 stays mounted
 from Step 7.
 
-<img src="media/mcsk-connections-flash.png" width="500"/>
+<img src="media/motor-connected.png" width="500"/>
 
 Program the board via the onboard debugger (**Make and Program Device** in
 MPLAB X).
@@ -489,7 +523,7 @@ anything. See [Using the Web Dashboard](#using-the-web-dashboard) above.
 > see above), and a capture is abandoned if the broker connection drops
 > partway through.
 
-## 11. Resources
+## 12. Resources
 
 - [dashboard/README.md](dashboard/README.md) - the web dashboard's own documentation (architecture, design decisions) for whoever maintains or redeploys it - not needed just to use it
 - [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotconnect.X/docs) - Microchip's motor-control reference application this quickstart is built on
