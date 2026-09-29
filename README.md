@@ -257,7 +257,7 @@ Microchip's [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotco
 
 > [!NOTE]
 > The motor's wires may not all comfortably reach their terminals depending
-> on how your board and motor are positioned - you may need to solder on
+> on how your board and motor are positioned so you may need to solder on
 > extensions for some of them.
 
 ## 9. Configure the Firmware
