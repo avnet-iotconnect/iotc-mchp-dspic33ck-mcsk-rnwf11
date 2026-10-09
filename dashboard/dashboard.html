@@ -51,6 +51,7 @@ input[type=number],input[type=email],input[type=password]{
  border-radius:8px;padding:9px 11px;font:inherit}
 input:focus{outline:2px solid var(--series-1);outline-offset:1px}
 label{display:block;font-size:.78rem;color:var(--text-secondary);margin:9px 0 4px;font-weight:600}
+.fieldhint{font-size:.72rem;color:var(--text-muted);margin:0 0 4px}
 .card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
      padding:16px;margin-bottom:14px}
 .card h2{margin:0 0 12px;font-size:.85rem;letter-spacing:.4px;text-transform:uppercase;color:var(--text-secondary)}
@@ -149,13 +150,14 @@ footer{margin-top:20px;color:var(--text-muted);font-size:.76rem;text-align:cente
     <div class="row tight">
      <button class="lime" data-cmd="motor-start">Start</button>
      <button class="red" data-cmd="motor-stop">Stop</button>
-     <button data-cmd="motor-reverse">Reverse</button>
     </div>
     <label for="speedval">Speed (% of max RPM)</label>
     <div class="row tight">
      <input id="speedval" type="number" min="0" max="100" value="50" style="max-width:100px">
-     <button class="ghost" id="speedbtn">Set speed</button>
+     <button id="speedbtn">Set speed</button>
+     <button data-cmd="motor-reverse">Reverse</button>
     </div>
+    <div class="fieldhint" id="speedrpmhint"></div>
    </div>
 
    <div class="card">
@@ -163,6 +165,7 @@ footer{margin-top:20px;color:var(--text-muted);font-size:.76rem;text-align:cente
     <div class="row">
      <div>
       <label for="oscch">Channel</label>
+      <div class="fieldhint">&nbsp;</div>
       <select id="oscch">
        <option value="0">0 &middot; DC bus voltage</option>
        <option value="1">1 &middot; PWM duty cycle</option>
@@ -172,16 +175,18 @@ footer{margin-top:20px;color:var(--text-muted);font-size:.76rem;text-align:cente
       </select>
      </div>
      <div>
-      <label for="oscrate">Rate (&micro;s/sample)</label>
+      <label for="oscrate">Sample Rate (microseconds)</label>
+      <div class="fieldhint">Min: 50 &middot; Max: 3,276,750 &middot; rounds to multiples of 50</div>
       <input id="oscrate" type="number" min="50" max="3276750" step="50" value="500">
      </div>
      <div>
       <label for="osclen">Length (samples)</label>
+      <div class="fieldhint">Min: 10 &middot; Max: 1,000</div>
       <input id="osclen" type="number" min="10" max="1000" value="50">
      </div>
     </div>
     <div class="row tight" style="margin-top:10px">
-     <button class="lime" id="oscapply">Apply channel/rate/length</button>
+     <button id="oscapply">Apply channel/rate/length</button>
      <button id="osccapture">Start capture</button>
     </div>
     <div class="scopehead" style="margin-top:14px">
@@ -377,6 +382,18 @@ $("speedbtn").onclick=()=>withBusy($("speedbtn"),async()=>{
  const pct=requireInt($("speedval").value,0,100,"Speed","%");
  await send("motor-speed",String(pct));
 });
+// Live RPM readout as the field is edited - purely informational, computed
+// from whatever's currently typed (even if out of range), not from telemetry
+// or a sent command. Same formula as MCAPP_MotorSetSpeedPercent() in
+// iotconnect_rnwf11.c: rpm = MAX_MOTORSPEED * percent / 100.
+function updateSpeedRpmHint(){
+ const n=Number($("speedval").value);
+ $("speedrpmhint").textContent=Number.isFinite(n)
+  ?("≈ "+Math.round(MAX_MOTORSPEED_RPM*n/100)+" RPM (of "+MAX_MOTORSPEED_RPM+" max)")
+  :"";
+}
+$("speedval").addEventListener("input",updateSpeedRpmHint);
+updateSpeedRpmHint();
 // Matches the real limits IOTC_RNWF11_OnCommand() enforces (iotconnect_rnwf11.c
 // - see SCOPE_RATE_US_MIN/MAX, SCOPE_LENGTH_MIN, SCOPE_BUFFER_MAX there) - the
 // firmware itself now REJECTS an out-of-range value outright rather than
@@ -395,7 +412,7 @@ function requireInt(value,min,max,label,unit){
 }
 $("oscapply").onclick=()=>withBusy($("oscapply"),async()=>{
  const ch=requireInt($("oscch").value,0,4,"Channel");
- const rate=requireInt($("oscrate").value,50,3276750,"Rate","µs");
+ const rate=requireInt($("oscrate").value,50,3276750,"Sample Rate","microseconds");
  const len=requireInt($("osclen").value,10,1000,"Length","samples");
  await send("scope-channel",String(ch));
  await send("scope-rate",String(rate));
@@ -413,6 +430,8 @@ const VBUS_VOLTS_PER_COUNT=ADC_LSB_V*2*((34e3+34e3+3.3e3)/3.3e3);      // ~2.176
 const AMPS_PER_COUNT=ADC_LSB_V/((4020/(62+470))*0.010);                // ~0.666 mA
 const PWM_PERIOD_COUNTS=4999;
 const CH_NAMES={0:"DC bus voltage",1:"PWM duty cycle",2:"Bus current",3:"Phase A current",4:"Phase B current"};
+/* MAX_MOTORSPEED in bldc_main.h - keep in sync if that ever changes. */
+const MAX_MOTORSPEED_RPM=4600;
 function convert(ch,values){
  if(ch===0)return{v:values.map(x=>x*VBUS_VOLTS_PER_COUNT),unit:"V",fmt:x=>x.toFixed(3)};
  if(ch===1)return{v:values.map(x=>100*x/PWM_PERIOD_COUNTS),unit:"%",fmt:x=>x.toFixed(1)};

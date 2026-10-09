@@ -423,13 +423,20 @@ directly from the /IOTCONNECT console).
 | Command          | Parameter           | Effect                                      |
 |------------------|---------------------|----------------------------------------------|
 | `scope-channel`  | integer, `0`-`4`    | Selects the signal to capture: `0`=DC bus voltage (default), `1`=PWM duty cycle, `2`=bus current, `3`=phase A current, `4`=phase B current |
-| `scope-rate`     | integer, `50`-`3276750` (µs) | Sample period in microseconds, rounded to the nearest 50µs (the motor control loop's tick rate); default 500µs (2kHz) |
+| `scope-rate`     | integer, `50`-`3276750` (µs), **multiples of 50** | Sample period in microseconds; default 500µs (2kHz) |
 | `scope-length`   | integer, `10`-`1000` | Number of samples per capture; default 50 (a 25ms window at the default rate) |
 | `scope-capture`  | none                | Starts a new capture using the current channel/rate/length settings |
 
 A value outside a command's range is **rejected** (the ack comes back failed,
 with a message giving the valid range) rather than silently rounded to the
 nearest limit.
+
+`scope-rate` is a special case: the sampling clock is the motor control
+loop's own 50µs tick, so only whole multiples of 50 are actually achievable.
+A value in range but not a multiple of 50 isn't rejected - it's rounded to
+the nearest 50µs (e.g. `80` becomes `100`), and the rounded value - not what
+was requested - is what's reported back in telemetry and used to label any
+capture taken at that rate.
 
 The default rate/length are set to match expected conditions for the included motor,
 but users are encouraged to tinker with different settings to achieve the captures they need.
