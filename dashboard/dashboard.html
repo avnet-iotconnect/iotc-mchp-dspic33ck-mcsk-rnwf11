@@ -126,7 +126,7 @@ footer{margin-top:20px;color:var(--text-muted);font-size:.76rem;text-align:cente
  <header>
   <div class="brand">Avnet<span class="slash">/</span><span>IOTCONNECT</span>
    <span class="prod">&nbsp;&middot; MCSK BLDC dashboard</span></div>
-  <select id="devsel" title="Board"></select>
+  <select id="devsel" title="Board" autocomplete="off"></select>
   <span class="pill" id="livepill">&hellip;</span>
   <span class="spacer"></span>
   <button class="ghost" id="themebtn" title="Toggle light/dark">&#9788;</button>
@@ -216,8 +216,17 @@ const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;");
 // README - the RNWF11 connects straight to an AWS IoT endpoint), so this
 // isn't something to ask each person signing in to type.
 const PLATFORM="aws";
-const S={token:null,solutionKey:null,env:null,device:null,commands:{},poll:null,
-        cand:{},hist:{},tv:{},ts:{},captureSig:null,lastCapture:null};
+// MAX_MOTORSPEED in bldc_main.h - keep in sync if that ever changes. Declared
+// here (not down with the oscilloscope constants) because updateSpeedRpmHint()
+// below calls itself immediately at load - a const declared further down the
+// file would still be in the temporal dead zone at that point, throwing a
+// ReferenceError that (being uncaught, at top level) silently aborted every
+// later top-level statement in this script, including the oscilloscope
+// buttons' onclick bindings - the actual cause of a real "buttons do nothing"
+// bug this fixes.
+const MAX_MOTORSPEED_RPM=4600;
+const S={token:null,solutionKey:null,env:null,device:null,deviceIndex:null,commands:{},poll:null,
+        captureSig:null,lastCapture:null,shownSig:null,candSig:null,booting:false};
 
 /* ---------- theme ---------- */
 (function(){
@@ -286,11 +295,25 @@ $("loginbtn").onclick=async()=>{
 $("logout").onclick=()=>{sessionStorage.removeItem("dashSession");location.reload()};
 
 async function boot(){
+ // tryResume() (auto-resuming a saved session) and a manual sign-in can both
+ // reach here: /bootstrap is slow enough with many devices on an account
+ // (each needs its own per-template command lookup) that the login form can
+ // still be sitting there interactive while an auto-resume's boot() is
+ // still in flight - nothing told the user it was already happening. If the
+ // user also signs in manually, BOTH calls complete a few seconds apart and
+ // BOTH call selectDevice(0) at the end, so the second one silently undoes
+ // whatever device the user picked in between - confirmed on real hardware
+ // via the Activity log showing two "signed in" lines a few seconds apart,
+ // the second one snapping the dropdown back to the default device. A
+ // simple in-flight guard means only the FIRST boot() to start ever runs to
+ // completion.
+ if(S.booting)return;
+ S.booting=true;
  let b;
  try{b=await api("bootstrap");}
- catch(e){$("loginstatus").innerHTML='<span class="err">'+esc(e.message)+'</span>';$("loginbtn").disabled=false;return}
+ catch(e){$("loginstatus").innerHTML='<span class="err">'+esc(e.message)+'</span>';$("loginbtn").disabled=false;S.booting=false;return}
  if(!b.devices.length){$("loginstatus").innerHTML='<span class="err">No matching device on this account - '
-  +'check TEMPLATE_GUID in the Lambda if you expected to see one.</span>';$("loginbtn").disabled=false;return}
+  +'check TEMPLATE_GUID in the Lambda if you expected to see one.</span>';$("loginbtn").disabled=false;S.booting=false;return}
  S.devices=b.devices;S.cmdsByTpl=b.commandsByTemplate||{};
  $("devsel").innerHTML=S.devices.map((d,i)=>'<option value="'+i+'">'+esc(d.uniqueId)+'</option>').join("");
  $("devsel").onchange=()=>selectDevice(+$("devsel").value);
@@ -300,8 +323,9 @@ async function boot(){
  if(!S.poll)S.poll=setInterval(refresh,3000);
 }
 function selectDevice(i){
- S.device=S.devices[i];S.commands=S.cmdsByTpl[S.device.templateGuid]||{};
- S.cand={};S.hist={};S.tv={};S.ts={};S.captureSig=null;S.lastCapture=null;
+ S.device=S.devices[i];S.deviceIndex=i;S.commands=S.cmdsByTpl[S.device.templateGuid]||{};
+ S.captureSig=null;S.lastCapture=null;S.shownSig=null;S.candSig=null;
+ $("devsel").value=String(i);
  log("viewing board <b>"+esc(S.device.uniqueId)+"</b>","ok");
  refresh();
 }
@@ -313,24 +337,6 @@ function selectDevice(i){
   await boot();
  }
 })();
-
-/* ---------- latching (mirrors the imx95 cockpit's latch(): the REST read is
-   eventually consistent, so a NOVEL value needs 2 consecutive polls to be
-   believed, a REVERSION to a previously-shown value needs 5 - stale
-   resurrection is far likelier than a real revert) ---------- */
-function latch(values,stamps){
- for(const k in values){
-  const st=(stamps||{})[k]||"",nv=values[k];
-  if(!(k in S.ts)){S.tv[k]=nv;S.ts[k]=st;(S.hist[k]=S.hist[k]||{})[String(nv)]=1;continue}
-  if(st<S.ts[k])continue;
-  if(nv===S.tv[k]){S.ts[k]=st;delete S.cand[k];continue}
-  const need=(S.hist[k]&&S.hist[k][String(nv)])?5:2;
-  const c=S.cand[k];
-  if(c&&c.v===nv)c.n++;else S.cand[k]={v:nv,n:1};
-  if(S.cand[k].n>=need){S.tv[k]=nv;S.ts[k]=st;(S.hist[k]=S.hist[k]||{})[String(nv)]=1;delete S.cand[k];}
- }
- return Object.assign({},S.tv);
-}
 
 /* ---------- motor state / telemetry rendering ---------- */
 const STATES={0:"init",1:"waiting",2:"offset cal",3:"running",4:"reversing",5:"stopping",6:"FAULT"};
@@ -345,6 +351,19 @@ const TILES=[["run",v=>v==1?"yes":"no","Motor running"],
             ["rpm",v=>v,"Requested speed","rpm"],
             ["spd",v=>v,"Measured speed","rpm"],
             ["vdc",v=>(v*0.002176).toFixed(2),"Bus voltage","V"]];
+// Only the fields that are genuinely STABLE while the motor holds a given
+// real state - see refresh()'s confirm-before-display check below for why
+// rpm/spd/duty/vdc are excluded. "sec" (commutation sector) is ALSO
+// excluded despite looking discrete/small-integer: it's the motor's
+// six-step commutation position, cycling 1-6 continuously while running
+// (mcappData.sector, set from the Hall sensor reading every commutation
+// step - see bldc_main.c) - two consecutive periodic publishes while
+// running almost never report the same sector, so including it meant
+// confirmation could only succeed by the ~1-in-6 coincidence of two polls
+// landing on the same sector, not a real design - this was the actual
+// cause of telemetry still taking tens of seconds to update even after
+// switching confirmation to "discrete fields only".
+const TELEMETRY_STATE_KEYS=["run","st"];
 function gauge(pct){
  const R=34,C=Math.PI*R,off=C*(1-Math.max(0,Math.min(1,pct/100)));
  return '<svg width="92" height="56" viewBox="0 0 84 48">'+
@@ -430,8 +449,6 @@ const VBUS_VOLTS_PER_COUNT=ADC_LSB_V*2*((34e3+34e3+3.3e3)/3.3e3);      // ~2.176
 const AMPS_PER_COUNT=ADC_LSB_V/((4020/(62+470))*0.010);                // ~0.666 mA
 const PWM_PERIOD_COUNTS=4999;
 const CH_NAMES={0:"DC bus voltage",1:"PWM duty cycle",2:"Bus current",3:"Phase A current",4:"Phase B current"};
-/* MAX_MOTORSPEED in bldc_main.h - keep in sync if that ever changes. */
-const MAX_MOTORSPEED_RPM=4600;
 function convert(ch,values){
  if(ch===0)return{v:values.map(x=>x*VBUS_VOLTS_PER_COUNT),unit:"V",fmt:x=>x.toFixed(3)};
  if(ch===1)return{v:values.map(x=>100*x/PWM_PERIOD_COUNTS),unit:"%",fmt:x=>x.toFixed(1)};
@@ -496,11 +513,95 @@ function drawChart(capture,channel){
 
 /* ---------- refresh loop ---------- */
 async function refresh(){
+ // Re-assert the dropdown's own visible selection every single poll,
+ // independent of anything else below - some browsers restore a <select>'s
+ // previous value from page/form history shortly after load, without firing
+ // a change event, bypassing selectDevice() (and its own one-time
+ // reassignment) entirely. Confirmed on real hardware that this only ever
+ // happens within the first ~10s after signing in, never after - but rather
+ // than chase that exact browser timing, re-checking every 3s means any
+ // such reversion self-corrects within one poll instead of sticking until
+ // the user manually re-selects.
+ if(S.deviceIndex!=null&&$("devsel").value!==String(S.deviceIndex)){
+  $("devsel").value=String(S.deviceIndex);
+ }
  try{
-  const t=await api("telemetry?guid="+encodeURIComponent(S.device.guid)
-                    +"&duid="+encodeURIComponent(S.device.uniqueId));
-  const v=latch(t.values||{},t.stamps);
-  renderTelemetry(v);
+  // selectDevice() fires a refresh() for the newly-picked device without
+  // waiting for any already-in-flight refresh() (from whichever device was
+  // showing before) to finish first. If that older request happens to
+  // resolve AFTER this one renders - plausible the moment someone switches
+  // devices, since the periodic 3s timer and a fresh on-switch call can
+  // easily overlap in flight - it would overwrite the screen with the
+  // PREVIOUS device's data with nothing to say it's stale, which looked
+  // like the dashboard "snapping back" to the first device right after
+  // picking a different one. Capturing which device this call started for,
+  // then bailing out if S.device has since changed, discards exactly that
+  // stale response instead of rendering it.
+  const forDevice=S.device;
+  const t=await api("telemetry?guid="+encodeURIComponent(forDevice.guid)
+                    +"&duid="+encodeURIComponent(forDevice.uniqueId));
+  if(S.device!==forDevice)return; // a different device was selected while this was in flight - discard
+  const raw=t.values||{};
+  // "run" is only ever set by the firmware's combined motor telemetry
+  // publish (IOTC_RNWF11_PublishTelemetry(), which sets run/st/sec/rpm/spd/
+  // duty/vdc all together in one message) - but that alone doesn't mark a
+  // poll as fresh: /Telemetry/device/{guid} returns the latest known value
+  // of EVERY attribute the device has ever set, on every single poll, so
+  // "run" is present in practically every response regardless of what was
+  // just published.
+  //
+  // Confirmed on real hardware, over the serial debug console, that the
+  // firmware's own MQTT publishes are rock solid with zero flicker at the
+  // source - yet this REST read occasionally served an entire OLD,
+  // internally-consistent snapshot (motor off, a stale requested/measured
+  // speed) in place of the current one: a replica-lag / eventual-
+  // consistency read, not a partial or malformed one. Since the firmware
+  // always publishes these fields together, a genuinely fresh poll's
+  // newest attribute (age_s, computed server-side in collapse_latest()) is
+  // bounded by the ~10s publish interval; a stale whole-snapshot replay's
+  // age_s spikes well past that. Gating the redraw on BOTH "looks like
+  // telemetry" AND "is actually fresh" is what keeps the dashboard holding
+  // its last real values until a genuinely new telemetry message arrives,
+  // instead of redrawing from a believable but old one.
+  //
+  // That gate alone still isn't enough: live testing turned up a single
+  // poll occasionally serving a stale whole-snapshot WHILE age_s still
+  // looked fresh - the backend's own freshness signal can't always be
+  // trusted either, not just the data. The remaining defense is a plain
+  // confirmation requirement: a snapshot is only ever DISPLAYED once the
+  // exact same one has been seen on two gate-passing polls - either back to
+  // back, or matching whatever's already shown (so a real, steady reading
+  // keeps rendering every poll with no repeated delay). Deliberately
+  // uniform, unlike the old latch() this replaced: no "2 polls for a novel
+  // value, 5 for a reversion" asymmetry - that asymmetry (treating a return
+  // to a previously-seen value as suspicious) was the actual bug that made
+  // the old mechanism get stuck for low-cardinality fields like run/st. A
+  // single bad poll, confirmed by nothing before the next real poll
+  // supersedes it, can never pass this - a sustained real change still only
+  // ever costs one extra ~3s poll... in theory. Live testing found that
+  // confirming the WHOLE snapshot (rpm/spd/duty/vdc included) actually cost
+  // 30+ seconds for a genuine motor-start, because those numeric fields can
+  // read back with tiny real variation poll to poll even when genuinely
+  // fresh (control-loop response, ADC/bus-voltage ripple) - every such
+  // wobble reset the candidate before two EXACT matches ever lined up,
+  // despite /IOTCONNECT's own Live Data tab already showing the change
+  // immediately. Confirmation is now keyed on TELEMETRY_STATE_KEYS
+  // (run/st/sec) only - discrete values that don't naturally drift between
+  // real reads of the same state, so they normally confirm in exactly one
+  // extra poll. Once that discrete state is trusted, the numeric fields
+  // from that SAME response are rendered immediately alongside it, with no
+  // separate confirmation of their own - they came from the one read that
+  // already earned trust.
+  const freshEnough=t.age_s!==null&&t.age_s!==undefined&&t.age_s<15;
+  if(("run" in raw)&&freshEnough){
+   const sig=TELEMETRY_STATE_KEYS.map(k=>raw[k]).join("|");
+   if(sig===S.shownSig||sig===S.candSig){
+    S.shownSig=sig;S.candSig=null;
+    renderTelemetry(raw);
+   }else{
+    S.candSig=sig;
+   }
+  }
   const fresh=t.age_s!==null&&t.age_s!==undefined&&t.age_s<45;
   $("livepill").textContent=fresh?"live":(t.age_s==null?"no data":"stale "+Math.round(t.age_s)+"s");
   $("livepill").className="pill "+(fresh?"live":"dead");
@@ -521,18 +622,16 @@ async function refresh(){
   const cap=S.lastCapture;
   // Channel/rate come from the capture ITSELF (cap.channel/cap.rate_us - see
   // reconstruct_capture() in lambda_function.py), not the separately-polled
-  // osc_ch/osc_rate telemetry (v.osc_ch/v.osc_rate): that value is latched
-  // (see latch() above - by design, needs a couple of polls to confirm a
-  // change, since it's meant for smoothing noisy sensor readings) and, worse,
-  // reflects whatever the CURRENT setting is - which can already differ from
+  // osc_ch/osc_rate telemetry (raw.osc_ch/raw.osc_rate): that value reflects
+  // whatever the CURRENT setting is - which can already differ from
   // whichever channel this specific capture was actually taken on. Pairing
   // "now" metadata with "then" data was a real mismatch (e.g. showing "PWM
   // duty cycle" right after switching to phase A current, while the graph
-  // already had the new channel's data), not just a display lag. v.osc_ch is
-  // kept only as a last-resort fallback for the rare case a capture has no
-  // settings message in the lookback window at all (cap.channel then null).
-  const ch=cap?(cap.channel!==null&&cap.channel!==undefined?cap.channel:(v.osc_ch!==undefined?+v.osc_ch:0)):0;
-  const rateUs=cap?(cap.rate_us!==null&&cap.rate_us!==undefined?cap.rate_us:v.osc_rate):undefined;
+  // already had the new channel's data), not just a display lag. raw.osc_ch
+  // is kept only as a last-resort fallback for the rare case a capture has
+  // no settings message in the lookback window at all (cap.channel then null).
+  const ch=cap?(cap.channel!==null&&cap.channel!==undefined?cap.channel:(raw.osc_ch!==undefined?+raw.osc_ch:0)):0;
+  const rateUs=cap?(cap.rate_us!==null&&cap.rate_us!==undefined?cap.rate_us:raw.osc_rate):undefined;
   // "none" is a sentinel distinct from any real signature and from the
   // initial S.captureSig (null) - so the very first poll, even with no
   // capture yet, still renders the chartbox's "no capture yet" placeholder

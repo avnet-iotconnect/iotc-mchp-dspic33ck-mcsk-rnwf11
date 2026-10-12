@@ -123,14 +123,23 @@ def collapse_latest(rows):
     rule the imx95 cockpit uses for ALL its telemetry (its Lambda's /telemetry
     route): the API can return more than one row per attribute in arbitrary
     order, and without this the UI flip-flops between a current and a stale
-    value."""
+    value.
+
+    Strictly-greater, not >=: with an arbitrary row order, a >= comparison
+    lets whichever same-timestamp row happens to come LAST in this response
+    silently win over one that came first - deterministic within one call,
+    but since the order isn't guaranteed to repeat, two separate polls that
+    both receive the same pair of same-timestamp rows could pick opposite
+    values, which looks exactly like flicker despite each individual poll's
+    own logic being internally consistent. Strict > makes the first row seen
+    for a given attribute win any such tie instead of the last."""
     values, stamp, newest = {}, {}, None
     for r in rows:
         k = r.get("attributeName")
         if k in SCOPE_ATTRS:
             continue
         ts = r.get("deviceUpdatedDate") or ""
-        if k and (k not in stamp or ts >= stamp[k]):
+        if k and (k not in stamp or ts > stamp[k]):
             values[k] = r.get("attributeValue")
             stamp[k] = ts
         if ts and (newest is None or ts > newest):
@@ -224,14 +233,12 @@ def reconstruct_capture(feed):
     every 10s by IOTC_RNWF11_PublishScopeSettings() - separate messages from
     the chunk ones) in this SAME feed, picking whichever preceded the
     capture's first chunk. Deliberately NOT sourced from the separately-
-    polled/latched scalar telemetry the rest of the dashboard uses: that
-    value only updates a couple of polls after actually changing (by design -
-    see latch() in dashboard.html, meant for smoothing noisy sensor readings,
-    not a setting a command changes instantly), and worse, it reflects
-    whatever the CURRENT setting is, which can already differ from whichever
-    channel this particular (possibly earlier) capture was actually taken on
-    - pairing "now" metadata with "then" data is a real mismatch, not just a
-    display lag, and this avoids it entirely by deriving both from the same
+    polled scalar telemetry the rest of the dashboard uses: that value
+    reflects whatever the CURRENT setting is, which can already differ from
+    whichever channel this particular (possibly earlier) capture was
+    actually taken on - pairing "now" metadata with "then" data is a real
+    mismatch, not just a display lag, and this avoids it entirely by
+    deriving both from the same
     history read.
     """
     msgs = [(item.get("dTime") or "", item.get("attr") or {})
