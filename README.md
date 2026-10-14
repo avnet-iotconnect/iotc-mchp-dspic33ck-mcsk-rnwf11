@@ -51,7 +51,7 @@ current, duty cycle, etc.) to /IOTCONNECT every 10 seconds.
 
 > [!NOTE]
 > Want to modify the firmware itself instead of just running the demo? See
-> [developer.md](developer.md). Building from source needs MPLAB X IDE, the
+> [DEVELOPER.md](DEVELOPER.md). Building from source needs MPLAB X IDE, the
 > XC-DSC compiler, and the `dsPIC33CK-MP_DFP` device pack instead of IPE.
 
 ## 2. Get the Quickstart Source
@@ -77,7 +77,7 @@ directory for the rest of this guide.
 > [!NOTE]
 > Prefer a full `git clone` instead? That works fine too, and is what you'll
 > need anyway if you end up building the firmware from source, see
-> [developer.md](developer.md).
+> [DEVELOPER.md](DEVELOPER.md).
 
 ## 3. Cloud Account Setup
 
@@ -306,7 +306,7 @@ pushes those **live, over the same serial connection**, straight into a
 dedicated flash page the firmware reads at boot, no rebuild needed since
 there's nothing to rebuild here. `--port`/`-Port` is what makes that happen,
 so it's required for this path (it's optional if you're building from
-source instead, see [developer.md](developer.md)):
+source instead, see [DEVELOPER.md](DEVELOPER.md)):
 
 **Linux:**
 ```bash
@@ -341,7 +341,7 @@ ahead to [Run the Demo](#10-run-the-demo).
 > [!TIP]
 > Want to modify the firmware itself instead (motor control parameters, the
 > oscilloscope feature, telemetry fields, etc.)? See
-> [developer.md](developer.md) for building from source.
+> [DEVELOPER.md](DEVELOPER.md) for building from source.
 
 ## 10. Run the Demo
 
@@ -394,13 +394,13 @@ hints shown right in the UI.
 > send can also be sent directly from the /IOTCONNECT console, and the
 > oscilloscope's raw published data (chunked JSON arrays) can be read
 > directly from /IOTCONNECT if you want to process it yourself instead of
-> using the dashboard. See [developer.md](developer.md) for the full command
+> using the dashboard. See [DEVELOPER.md](DEVELOPER.md) for the full command
 > reference, wire format, engineering-unit conversions, and suggested
 > capture settings for this motor.
 
 ## 11. Resources
 
-- [developer.md](developer.md), covering building the firmware from source, the full C2D command reference, oscilloscope wire format, engineering-unit conversions, and suggested capture settings. Not needed just to run the demo.
+- [DEVELOPER.md](DEVELOPER.md), covering building the firmware from source, the full C2D command reference, oscilloscope wire format, engineering-unit conversions, and suggested capture settings. Not needed just to run the demo.
 - [dashboard/README.md](dashboard/README.md), the web dashboard's own documentation (architecture, design decisions) for whoever maintains or redeploys it. Not needed just to use it.
 - [AN957 Demo ReadMe MCSK.pdf](firmware/dspic33ck256mp508_rnwf11_iotconnect.X/docs), Microchip's motor-control reference application this quickstart is built on
 - [iotc-mchp-dspic33-curosity-rnwf11](https://github.com/avnet-iotconnect/iotc-mchp-dspic33-curosity-rnwf11), a related /IOTCONNECT quickstart for the dsPIC33AK512MPS512 Curiosity board, using the same RNWF11 add-on board
