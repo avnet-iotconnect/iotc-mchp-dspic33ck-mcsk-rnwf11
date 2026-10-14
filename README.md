@@ -47,7 +47,6 @@ current, duty cycle, etc.) to /IOTCONNECT every 10 seconds.
 2. `openssl` on your `PATH` (already present on most Linux systems; on Windows it's included with [Git for Windows](https://git-scm.com/downloads/win), among other sources)
 3. Either Python 3.9+ **or** PowerShell 5.1+ (Windows ships this by default; PowerShell 7+ also works on Linux) to run the provisioning scripts. Pick whichever you're more comfortable with, both do the same thing
 4. A serial terminal (PuTTY, Tera Term, MPLAB Data Visualizer's terminal, etc.) to watch the device's console output
-5. An [/IOTCONNECT](https://www.iotconnect.io/) account
 
 > [!NOTE]
 > Want to modify the firmware itself instead of just running the demo? See
@@ -74,10 +73,6 @@ directory for the rest of this guide.
      [tools/provision_rnwf11_cert.ps1](tools/provision_rnwf11_cert.ps1),
      [tools/provision_device_config.ps1](tools/provision_device_config.ps1)
 
-> [!NOTE]
-> Prefer a full `git clone` instead? That works fine too, and is what you'll
-> need anyway if you end up building the firmware from source, see
-> [DEVELOPER.md](DEVELOPER.md).
 
 ## 3. Cloud Account Setup
 
@@ -289,22 +284,14 @@ from Step 2. No compiler, no opening the firmware project.
    <img src="media/mclr-button.png" width="400"/>
 
 > [!IMPORTANT]
-> Always press **MCLR** after programming, even if IPE reports "Programming/
-> Verify complete" and "Release From Reset mode is enabled." Confirmed on
-> real hardware: the debugger can leave the board sitting in reset
-> afterward regardless of what the log says, and a DC power-cycle alone
-> doesn't reliably fix this either (PKOB4 is powered over its own USB
-> connection, independent of the board's supply, and can keep holding the
-> chip in reset through a power-cycle of the board itself). Pressing MCLR
-> is the only way confirmed to reliably get the firmware actually running
-> at this point. Don't skip it, even if the next step seems to work
-> without it.
+> Always press **MCLR** after programming.
 
 This binary ships unprovisioned. It has no WiFi or /IOTCONNECT credentials
-built in, so it won't connect to anything yet on its own. `provision_device_config.py`/`.ps1`
-pushes those **live, over the same serial connection**, straight into a
-dedicated flash page the firmware reads at boot, no rebuild needed since
-there's nothing to rebuild here. `--port`/`-Port` is what makes that happen,
+built in, so it won't connect to anything yet on its own.
+
+`provision_device_config.py`/`.ps1` pushes those values over the serial connection, straight into a
+dedicated flash page the firmware reads at boot, so no rebuild is necessary.
+`--port`/`-Port` is what makes that happen,
 so it's required for this path (it's optional if you're building from
 source instead, see [DEVELOPER.md](DEVELOPER.md)):
 
@@ -330,18 +317,10 @@ reliable way to get a clean reconnect using the newly-saved config. Skip
 ahead to [Run the Demo](#10-run-the-demo).
 
 > [!WARNING]
-> If you ever reflash via MPLAB IPE again after provisioning (e.g. to
-> update to a newer `.hex`), it erases the **entire** chip, not just the
-> program code. This wipes the saved WiFi/IOTCONNECT config right along
-> with it, even though that config lives in its own separate flash page
-> outside the program memory range IPE reports programming. You'll need to
-> run the provisioning script again afterward; there's no way to reflash
-> without losing it.
+> If you reflash via MPLAB IPE again after provisioning (e.g. to
+> update to a newer `.hex`), it also wipes the saved WiFi/IOTCONNECT config. 
+> You'll need to run the provisioning script again afterward.
 
-> [!TIP]
-> Want to modify the firmware itself instead (motor control parameters, the
-> oscilloscope feature, telemetry fields, etc.)? See
-> [DEVELOPER.md](DEVELOPER.md) for building from source.
 
 ## 10. Run the Demo
 
