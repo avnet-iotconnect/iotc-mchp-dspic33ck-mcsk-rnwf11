@@ -57,3 +57,6 @@ ENV/
 *.tmp.*
 *.bak
 *.orig
+
+# Temporary (typically AI agent) work files
+/work*/

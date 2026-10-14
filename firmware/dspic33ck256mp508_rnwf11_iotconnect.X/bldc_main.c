@@ -46,6 +46,11 @@
 * certify, or support the code.
 *
 *******************************************************************************/
+/* SPDX-License-Identifier: MIT
+ * Additions on top of Microchip's reference application above are:
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
 // *****************************************************************************
 // *****************************************************************************
 // Section: Included Files
@@ -69,13 +74,13 @@
 // *****************************************************************************  
 // desiredSpeed defaults to 50% of MAX_MOTORSPEED so the motor has a sensible
 // speed to run at before the first "motor-speed" C2D command ever arrives.
-// This is a one-time boot default, not reapplied on every stop/restart -
+// This is a one-time boot default, not reapplied on every stop/restart.
 // MCAPP_INIT (re-entered on every stop cycle) deliberately does not touch it,
 // so a speed set via MCAPP_MotorSetSpeedPercent() still holds across a
 // motor-stop/motor-start cycle, per its documented behavior.
 // The multiply must be done in 32 bits: int is 16 bits on the dsPIC, so a plain
 // (MAX_MOTORSPEED * 50) overflows (230000 wraps to -32144, giving a default of
-// -321 RPM - i.e. 65215 in the unsigned field - and a stalled speed loop).
+// -321 RPM, i.e. 65215 in the unsigned field, and a stalled speed loop).
 MCAPP_DATA_T     mcappData = { .desiredSpeed = (uint16_t)(((uint32_t)MAX_MOTORSPEED * 50UL) / 100UL) };
 /******************************************************************************
  * Description: The main function initialises the microcontroller port configurations
@@ -97,19 +102,19 @@ int main(void)
 
 	while(1)
 	{
-    IOTC_RNWF11_Telemetry_t telemetry = {
-        .motorRunning = mcappData.runMotor,
+    IotcRnwf11Telemetry telemetry = {
+        .motor_running = mcappData.runMotor,
         .state = mcappData.state,
         .sector = mcappData.sector,
-        .requestedSpeedRpm = mcappData.desiredSpeed,
-        .measuredSpeedRpm = mcappData.calculateSpeed.speedValue,
-        .requestedCurrent = mcappData.desiredCurrent,
-        .measuredCurrent = mcappData.measuredCurrent,
-        .dutyCycle = mcappData.dutyCycle,
-        .dcBusAdc = mcappData.analogInputs.measureVdc.value
+        .requested_speed_rpm = mcappData.desiredSpeed,
+        .measured_speed_rpm = mcappData.calculateSpeed.speedValue,
+        .requested_current = mcappData.desiredCurrent,
+        .measured_current = mcappData.measuredCurrent,
+        .duty_cycle = mcappData.dutyCycle,
+        .dc_bus_adc = mcappData.analogInputs.measureVdc.value
     };
-        // SW1 stays live as a manual on/off override - e.g. to stop the motor
-        // by hand if the internet connection drops - but it is handled in the
+        // SW1 stays live as a manual on/off override, e.g. to stop the motor
+        // by hand if the internet connection drops, but it is handled in the
         // ADC interrupt (MCAPP_ButtonTick), not here: the calls below block for
         // long stretches (Wi-Fi/MQTT connect waits, scope publishing), and a
         // button polled from this loop is simply not seen while they run. SW2
@@ -187,147 +192,135 @@ void MCAPP_MotorStop(void)
 
 void MCAPP_MotorReverse(void)
 {
-    if (mcappData.changeDirection == 0)
-    {
+    if (mcappData.changeDirection == 0) {
         mcappData.changeDirection = 1;
     }
 }
 
 void MCAPP_MotorSetSpeedPercent(uint8_t percent)
 {
-    if (percent > 100U)
-    {
+    if (percent > 100U) {
         percent = 100U;
     }
     mcappData.desiredSpeed = (uint16_t)(((uint32_t)MAX_MOTORSPEED * percent) / 100U);
 }
 /******************************************************************************
- * Description: Software oscilloscope capture - see scope_commands.h. State is
+ * Description: Software oscilloscope capture, see scope_commands.h. State is
  *              a single-writer handoff between HAL_MC1ADCInterrupt() (owns it
  *              while armed) and the command/publish side in main()'s context
  *              (only touches it once SCOPE_IsReady(), i.e. once the ISR has
- *              stopped writing), so no locking is needed - the same pattern
+ *              stopped writing), so no locking is needed, the same pattern
  *              mcappData itself already relies on elsewhere in this file.
  *****************************************************************************/
 // SCOPE_LENGTH_MIN lives in scope_commands.h now (shared with
-// IOTC_RNWF11_OnCommand()'s validation - see its comment there). Ticks here
+// IOTC_RNWF11_OnCommand()'s validation, see its comment there). Ticks here
 // are an internal detail; SCOPE_RATE_TICKS_MIN=1 and the 0xFFFFU clamp below
-// are what SCOPE_RATE_US_MIN/MAX in that header are computed FROM - if either
+// are what SCOPE_RATE_US_MIN/MAX in that header are computed FROM, if either
 // changes here, update that header's pair to match.
 #define SCOPE_RATE_TICKS_MIN  1U
 #define SCOPE_ADC_TICK_US     LOOPTIME_MICROSEC // 50us per HAL_MC1ADCInterrupt() call
 
-static volatile bool scopeArmed;
-static volatile bool scopeReady;
+static volatile bool scope_armed;
+static volatile bool scope_ready;
 // Defaults chosen against this motor's actual electrical rate, not arbitrary
 // round numbers: MAX_MOTORSPEED=4600 RPM with POLEPAIRS=2 gives one electrical
-// revolution every ~6.5ms at max speed (~13ms at the 50%-speed boot default -
+// revolution every ~6.5ms at max speed (~13ms at the 50%-speed boot default,
 // see mcappData's initializer above). 10 ticks * 50us = 500us/sample gives
-// ~13 samples/electrical-cycle at max speed (~26 at the 50% default) - enough
-// to resolve waveform shape, not just a Nyquist-minimum zigzag - while the
+// ~13 samples/electrical-cycle at max speed (~26 at the 50% default), enough
+// to resolve waveform shape, not just a Nyquist-minimum zigzag, while the
 // default 50-sample length spans a 25ms window, i.e. several full electrical
 // cycles at any speed the motor actually runs at.
-static uint8_t scopeChannel;              // SCOPE_CHANNEL_* - defaults to SCOPE_CHANNEL_VDC (0)
-static uint16_t scopeRateTicks = 10U;     // 10 ticks * 50us = 500us default
-static uint16_t scopeLength = 50U;        // default capture length (500us * 50 = 25ms window)
-static uint16_t scopeTickCounter;
-static uint16_t scopeSampleIndex;
-static int16_t scopeBuffer[SCOPE_BUFFER_MAX];
+static uint8_t scope_channel;          // SCOPE_CHANNEL_*, defaults to SCOPE_CHANNEL_VDC (0)
+static uint16_t scope_rate_ticks = 10U; // 10 ticks * 50us = 500us default
+static uint16_t scope_length = 50U;    // default capture length (500us * 50 = 25ms window)
+static uint16_t scope_tick_counter;
+static uint16_t scope_sample_index;
+static int16_t scope_buffer[SCOPE_BUFFER_MAX];
 
 void SCOPE_SetChannel(uint8_t channel)
 {
-    if (channel > SCOPE_CHANNEL_MAX)
-    {
+    if (channel > SCOPE_CHANNEL_MAX) {
         channel = SCOPE_CHANNEL_MAX;
     }
-    scopeChannel = channel;
+    scope_channel = channel;
 }
 
 void SCOPE_SetRateMicroseconds(uint32_t us)
 {
     uint32_t ticks = (us + (SCOPE_ADC_TICK_US / 2U)) / SCOPE_ADC_TICK_US; // round to nearest tick
-    if (ticks < SCOPE_RATE_TICKS_MIN)
-    {
+    if (ticks < SCOPE_RATE_TICKS_MIN) {
         ticks = SCOPE_RATE_TICKS_MIN;
     }
-    if (ticks > 0xFFFFU)
-    {
+    if (ticks > 0xFFFFU) {
         ticks = 0xFFFFU;
     }
-    scopeRateTicks = (uint16_t)ticks;
+    scope_rate_ticks = (uint16_t)ticks;
 }
 
 void SCOPE_SetLength(uint16_t length)
 {
-    if (length < SCOPE_LENGTH_MIN)
-    {
+    if (length < SCOPE_LENGTH_MIN) {
         length = SCOPE_LENGTH_MIN;
-    }
-    else if (length > SCOPE_BUFFER_MAX)
-    {
+    } else if (length > SCOPE_BUFFER_MAX) {
         length = SCOPE_BUFFER_MAX;
     }
-    scopeLength = length;
+    scope_length = length;
 }
 
 void SCOPE_StartCapture(void)
 {
-    scopeReady = false;
-    scopeSampleIndex = 0;
-    scopeTickCounter = 0;
-    scopeArmed = true; // must be last - see the single-writer-handoff note above
+    scope_ready = false;
+    scope_sample_index = 0;
+    scope_tick_counter = 0;
+    scope_armed = true; // must be last, see the single-writer-handoff note above
 }
 
 bool SCOPE_IsReady(void)
 {
-    return scopeReady;
+    return scope_ready;
 }
 
 void SCOPE_ClearReady(void)
 {
-    scopeReady = false;
+    scope_ready = false;
 }
 
 uint8_t SCOPE_GetChannel(void)
 {
-    return scopeChannel;
+    return scope_channel;
 }
 
 uint32_t SCOPE_GetRateMicroseconds(void)
 {
-    return (uint32_t)scopeRateTicks * SCOPE_ADC_TICK_US;
+    return (uint32_t)scope_rate_ticks * SCOPE_ADC_TICK_US;
 }
 
 uint16_t SCOPE_GetLength(void)
 {
-    return scopeLength;
+    return scope_length;
 }
 
 int16_t SCOPE_GetSample(uint16_t index)
 {
-    if (index >= scopeLength)
-    {
+    if (index >= scope_length) {
         return 0;
     }
-    return scopeBuffer[index];
+    return scope_buffer[index];
 }
 
-// Called once per HAL_MC1ADCInterrupt() tick (every 50us) - see the call site there.
+// Called once per HAL_MC1ADCInterrupt() tick (every 50us), see the call site there.
 static void SCOPE_Tick(void)
 {
-    if (!scopeArmed)
-    {
+    if (!scope_armed) {
         return;
     }
-    if (++scopeTickCounter < scopeRateTicks)
-    {
+    if (++scope_tick_counter < scope_rate_ticks) {
         return;
     }
-    scopeTickCounter = 0;
+    scope_tick_counter = 0;
 
     int16_t value;
-    switch (scopeChannel)
-    {
+    switch (scope_channel) {
         case SCOPE_CHANNEL_DUTY:
             value = mcappData.dutyCycle;
             break;
@@ -345,11 +338,10 @@ static void SCOPE_Tick(void)
             value = mcappData.analogInputs.measureVdc.value;
             break;
     }
-    scopeBuffer[scopeSampleIndex++] = value;
-    if (scopeSampleIndex >= scopeLength)
-    {
-        scopeArmed = false;
-        scopeReady = true;
+    scope_buffer[scope_sample_index++] = value;
+    if (scope_sample_index >= scope_length) {
+        scope_armed = false;
+        scope_ready = true;
     }
 }
 /******************************************************************************
@@ -415,7 +407,7 @@ void __attribute__((__interrupt__,no_auto_psv)) HAL_MC1ADCInterrupt()
     MCAPP_ButtonTick();
 /**  Routine to run the Motor Control State Machine */
     MCAPP_StateMachine();
-/**  Software oscilloscope sample point - see scope_commands.h */
+/**  Software oscilloscope sample point, see scope_commands.h */
     SCOPE_Tick();
 
     HAL_MC1ADCInterruptFlagClear();
@@ -515,7 +507,7 @@ void MCAPP_StateMachine(void)
 
             #ifdef   SPEED_PI_CLOSEDLOOP
             // desiredSpeed is set exclusively by MCAPP_MotorSetSpeedPercent()
-            // (via a "motor-speed" C2D command) - the potentiometer no longer
+            // (via a "motor-speed" C2D command); the potentiometer no longer
             // drives it, so it is not recomputed here.
             mcappData.piInputSpeed.inMeasure = mcappData.calculateSpeed.speedValue;
             mcappData.piInputSpeed.inReference = mcappData.desiredSpeed;

@@ -129,31 +129,51 @@ Write-Host "Resolved telemetry topic: $($identity.topics.rpt)"
 Write-Host "Resolved C2D topic: $($identity.topics.c2d)"
 Write-Host "Resolved ack topic: $($identity.topics.ack)"
 
-try {
-    $lines = Get-Content -Path $ConfigHeader
-    $defines = [ordered]@{
-        IOTC_WIFI_SSID            = $WifiSsid
-        IOTC_WIFI_PASSWORD        = $WifiPassword
-        IOTC_MQTT_BROKER_HOST     = $identity.h
-        IOTC_MQTT_CLIENT_ID       = $identity.id
-        IOTC_MQTT_USERNAME        = $(if ($identity.un) { $identity.un } else { "" })
-        IOTC_MQTT_TELEMETRY_TOPIC = $identity.topics.rpt
-        IOTC_MQTT_C2D_TOPIC       = $identity.topics.c2d
-        IOTC_MQTT_ACK_TOPIC       = $identity.topics.ack
+# Only the default path is optional: someone who downloaded just the
+# quickstart files (no firmware/ source tree - see the README) has nothing
+# at this path, and that's fine as long as -Port is going to configure the
+# board directly instead. An EXPLICITLY-passed -ConfigHeader is a real
+# request to update that file, so a missing path there still fails loudly
+# rather than being silently skipped.
+$usingDefaultHeaderPath = -not $PSBoundParameters.ContainsKey('ConfigHeader')
+$headerUpdated = $false
+if ($usingDefaultHeaderPath -and -not (Test-Path -Path $ConfigHeader)) {
+    Write-Host ("Note: $ConfigHeader not found - skipping the compiled-in config header " +
+        "(expected if you downloaded just the quickstart files rather than the full firmware source).")
+} else {
+    try {
+        $lines = Get-Content -Path $ConfigHeader
+        $defines = [ordered]@{
+            IOTC_WIFI_SSID            = $WifiSsid
+            IOTC_WIFI_PASSWORD        = $WifiPassword
+            IOTC_MQTT_BROKER_HOST     = $identity.h
+            IOTC_MQTT_CLIENT_ID       = $identity.id
+            IOTC_MQTT_USERNAME        = $(if ($identity.un) { $identity.un } else { "" })
+            IOTC_MQTT_TELEMETRY_TOPIC = $identity.topics.rpt
+            IOTC_MQTT_C2D_TOPIC       = $identity.topics.c2d
+            IOTC_MQTT_ACK_TOPIC       = $identity.topics.ack
+        }
+        foreach ($name in $defines.Keys) {
+            $lines = Set-Define -Lines $lines -Name $name -Value $defines[$name]
+        }
+        Set-Content -Path $ConfigHeader -Value $lines
+        Write-Host "Updated $ConfigHeader with your WiFi credentials and resolved IoTConnect connection info."
+        $headerUpdated = $true
+    } catch {
+        Write-Host "FAILED: could not update $ConfigHeader`: $_"
+        exit 1
     }
-    foreach ($name in $defines.Keys) {
-        $lines = Set-Define -Lines $lines -Name $name -Value $defines[$name]
-    }
-    Set-Content -Path $ConfigHeader -Value $lines
-    Write-Host "Updated $ConfigHeader with your WiFi credentials and resolved IoTConnect connection info."
-} catch {
-    Write-Host "FAILED: could not update $ConfigHeader`: $_"
-    exit 1
 }
 
 if ([string]::IsNullOrEmpty($Port)) {
-    Write-Host "SUCCESS: config header updated. Rebuild and reflash the firmware to apply it."
-    exit 0
+    if ($headerUpdated) {
+        Write-Host "SUCCESS: config header updated. Rebuild and reflash the firmware to apply it."
+        exit 0
+    }
+    Write-Host ("FAILED: nothing to do - pass -Port to configure an already-flashed board " +
+        "directly over serial, or run this from a full clone of the repo (with the " +
+        "firmware/ source present) to update the config header instead.")
+    exit 1
 }
 
 $fields = [ordered]@{

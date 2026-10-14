@@ -1,3 +1,8 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -16,32 +21,27 @@ static char line_buf[LINE_BUF_MAX];
 static uint16_t ReadLineBlocking(void)
 {
     line_len = 0;
-    for (;;)
-    {
-        if (!UART1_IsReceiveBufferDataReady())
-        {
+    for (;;) {
+        if (!UART1_IsReceiveBufferDataReady()) {
             continue;
         }
         char c = (char)UART1_DataRead();
-        if (c == '\n')
-        {
+        if (c == '\n') {
             line_buf[line_len] = '\0';
             return line_len;
         }
-        if (c == '\r')
-        {
+        if (c == '\r') {
             continue;
         }
-        if (line_len >= (LINE_BUF_MAX - 1U))
-        {
-            line_len = 0; // overflow - discard and keep reading this line
+        if (line_len >= (LINE_BUF_MAX - 1U)) {
+            line_len = 0; // overflow, discard and keep reading this line
             continue;
         }
         line_buf[line_len++] = c;
     }
 }
 
-static bool ApplyField(device_config_t *cfg, const char *key, const char *value)
+static bool ApplyField(DeviceConfig *cfg, const char *key, const char *value)
 {
     if (strcmp(key, "WIFI_SSID") == 0)
         snprintf(cfg->wifi_ssid, sizeof(cfg->wifi_ssid), "%s", value);
@@ -51,7 +51,7 @@ static bool ApplyField(device_config_t *cfg, const char *key, const char *value)
         snprintf(cfg->iotc_cpid, sizeof(cfg->iotc_cpid), "%s", value);
     else if (strcmp(key, "IOTC_ENV") == 0)
         snprintf(cfg->iotc_env, sizeof(cfg->iotc_env), "%s", value);
-    else if (strcmp(key, "IOTC_DUID") == 0) // script's resolved MQTT client ID, not the raw Unique ID - see device_config.h
+    else if (strcmp(key, "IOTC_DUID") == 0) // script's resolved MQTT client ID, not the raw Unique ID, see device_config.h
         snprintf(cfg->mqtt_client_id, sizeof(cfg->mqtt_client_id), "%s", value);
     else if (strcmp(key, "MQTT_BROKER_HOST") == 0)
         snprintf(cfg->mqtt_broker_host, sizeof(cfg->mqtt_broker_host), "%s", value);
@@ -81,55 +81,44 @@ bool PROVISIONING_CheckForRequest(void)
     static uint16_t peek_len = 0;
     static char peek_buf[16]; // just long enough to match "PROVISION"
 
-    while (UART1_IsReceiveBufferDataReady())
-    {
+    while (UART1_IsReceiveBufferDataReady()) {
         char c = (char)UART1_DataRead();
-        if (c == '\n')
-        {
+        if (c == '\n') {
             peek_buf[peek_len] = '\0';
             bool match = (peek_len == 9U) && (strcmp(peek_buf, "PROVISION") == 0);
             peek_len = 0;
-            if (match)
-            {
+            if (match) {
                 return true;
             }
             continue;
         }
-        if (c == '\r')
-        {
+        if (c == '\r') {
             continue;
         }
-        if (peek_len < (sizeof(peek_buf) - 1U))
-        {
+        if (peek_len < (sizeof(peek_buf) - 1U)) {
             peek_buf[peek_len++] = c;
-        }
-        else
-        {
-            peek_len = 0; // not "PROVISION" - resync on the next line
+        } else {
+            peek_len = 0; // not "PROVISION", resync on the next line
         }
     }
     return false;
 }
 
-bool PROVISIONING_RunOnce(device_config_t *out)
+bool PROVISIONING_RunOnce(DeviceConfig *out)
 {
     memset(out, 0, sizeof(*out));
 
-    for (;;)
-    {
+    for (;;) {
         uint16_t len = ReadLineBlocking();
-        if (len == 0)
-        {
-            continue; // blank or overflowed line - keep waiting
+        if (len == 0) {
+            continue; // blank or overflowed line, keep waiting
         }
-        if (strcmp(line_buf, "END") == 0)
-        {
+        if (strcmp(line_buf, "END") == 0) {
             break;
         }
 
         char *eq = strchr(line_buf, '=');
-        if (eq == NULL)
-        {
+        if (eq == NULL) {
             DEBUG_Printf("ERROR:malformed line\r\n");
             return false;
         }
@@ -137,15 +126,13 @@ bool PROVISIONING_RunOnce(device_config_t *out)
         const char *key = line_buf;
         const char *value = eq + 1;
 
-        if (!ApplyField(out, key, value))
-        {
+        if (!ApplyField(out, key, value)) {
             DEBUG_Printf("ERROR:unknown key %s\r\n", key);
             return false;
         }
     }
 
-    if (!DEVICE_CONFIG_Save(out))
-    {
+    if (!DEVICE_CONFIG_Save(out)) {
         DEBUG_Printf("ERROR:flash write failed\r\n");
         return false;
     }

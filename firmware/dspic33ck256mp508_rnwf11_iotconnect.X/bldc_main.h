@@ -47,6 +47,11 @@
 * certify, or support the code.
 *
 *******************************************************************************/
+/* SPDX-License-Identifier: MIT
+ * Additions on top of Microchip's reference application above are:
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
 #ifndef BLDC_MAIN_H
 #define	BLDC_MAIN_H
 
@@ -168,7 +173,7 @@ void MCAPP_StateMachine(void);               //Function to run the State Machine
 void MCAPP_InitControlParameters(void);      //Initialize PI controller values
 void MCAPP_CheckHallUpdatePWM(void);          //Read Hall Port Data and update PWM switching
 // MCAPP_Motor{Start,Stop,Reverse,SetSpeedPercent} are declared in motor_commands.h
-// (included above) - see that header for why they live separately.
+// (included above), see that header for why they live separately.
 // *****************************************************************************
 // *****************************************************************************
 // Section: Enums, Structures

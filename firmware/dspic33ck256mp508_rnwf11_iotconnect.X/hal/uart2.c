@@ -1,3 +1,8 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
+
 #include <xc.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -6,10 +11,10 @@
 
 #define UART2_RX_BUFFER_SIZE 512U
 
-static volatile uint8_t rxBuffer[UART2_RX_BUFFER_SIZE];
-static volatile uint16_t rxHead;
-static volatile uint16_t rxTail;
-static volatile bool rxOverflow;
+static volatile uint8_t rx_buffer[UART2_RX_BUFFER_SIZE];
+static volatile uint16_t rx_head;
+static volatile uint16_t rx_tail;
+static volatile bool rx_overflow;
 
 void UART2_Initialize(uint32_t baud)
 {
@@ -23,7 +28,7 @@ void UART2_Initialize(uint32_t baud)
     U2STA = 0;
     U2STAH = 0;
 
-    /* 8-N-1, high-speed BRG so 230400 lands within 0.5% at FCY = 100 MHz. */
+    // 8-N-1, high-speed BRG so 230400 lands within 0.5% at FCY = 100 MHz.
     U2MODEbits.MOD = 0;
     U2MODEbits.BRGH = 1;
     U2BRG = (uint16_t)((FCY / (4UL * baud)) - 1UL);
@@ -31,15 +36,15 @@ void UART2_Initialize(uint32_t baud)
 
     U2STAHbits.URXISEL = 0;
 
-    rxHead = 0;
-    rxTail = 0;
-    rxOverflow = false;
+    rx_head = 0;
+    rx_tail = 0;
+    rx_overflow = false;
 
     U2MODEbits.UARTEN = 1;
     U2MODEbits.UTXEN = 1;
     U2MODEbits.URXEN = 1;
 
-    /* Below the motor control ADC interrupt so commutation is never delayed. */
+    // Below the motor control ADC interrupt so commutation is never delayed.
     _U2RXIP = 2;
     _U2RXIF = 0;
     _U2RXIE = 1;
@@ -47,38 +52,32 @@ void UART2_Initialize(uint32_t baud)
 
 static void UART2_DrainFifo(void)
 {
-    while (!U2STAHbits.URXBE)
-    {
+    while (!U2STAHbits.URXBE) {
         uint8_t data = (uint8_t)U2RXREG;
-        uint16_t next = (uint16_t)((rxHead + 1U) % UART2_RX_BUFFER_SIZE);
-        if (next != rxTail)
-        {
-            rxBuffer[rxHead] = data;
-            rxHead = next;
-        }
-        else
-        {
-            rxOverflow = true;
+        uint16_t next = (uint16_t)((rx_head + 1U) % UART2_RX_BUFFER_SIZE);
+        if (next != rx_tail) {
+            rx_buffer[rx_head] = data;
+            rx_head = next;
+        } else {
+            rx_overflow = true;
         }
     }
-    if (U2STAbits.OERR)
-    {
+    if (U2STAbits.OERR) {
         U2STAbits.OERR = 0;
-        rxOverflow = true;
+        rx_overflow = true;
     }
 }
 
 void __attribute__((__interrupt__, no_auto_psv)) _U2RXInterrupt(void)
 {
-    /* Clear before draining so a byte arriving mid-drain re-triggers. */
+    // Clear before draining so a byte arriving mid-drain re-triggers.
     _U2RXIF = 0;
     UART2_DrainFifo();
 }
 
 void UART2_Write(uint8_t data)
 {
-    while (U2STAHbits.UTXBF)
-    {
+    while (U2STAHbits.UTXBF) {
     }
     U2TXREG = data;
 }
@@ -90,44 +89,42 @@ bool UART2_IsTransmitComplete(void)
 
 bool UART2_IsOverrun(void)
 {
-    return rxOverflow;
+    return rx_overflow;
 }
 
 void UART2_ClearOverrun(void)
 {
-    rxOverflow = false;
+    rx_overflow = false;
 }
 
 bool UART2_IsReceiveDataAvailable(void)
 {
-    if (rxHead == rxTail)
-    {
-        /* Fallback in case an interrupt was missed. */
+    if (rx_head == rx_tail) {
+        // Fallback in case an interrupt was missed.
         _U2RXIE = 0;
         UART2_DrainFifo();
         _U2RXIE = 1;
     }
-    return rxHead != rxTail;
+    return rx_head != rx_tail;
 }
 
 uint8_t UART2_Read(void)
 {
-    uint8_t data = rxBuffer[rxTail];
-    rxTail = (uint16_t)((rxTail + 1U) % UART2_RX_BUFFER_SIZE);
+    uint8_t data = rx_buffer[rx_tail];
+    rx_tail = (uint16_t)((rx_tail + 1U) % UART2_RX_BUFFER_SIZE);
     return data;
 }
 
 void UART2_ReceiveFlush(void)
 {
     _U2RXIE = 0;
-    while (!U2STAHbits.URXBE)
-    {
+    while (!U2STAHbits.URXBE) {
         (void)U2RXREG;
     }
     U2STAbits.OERR = 0;
-    rxHead = 0;
-    rxTail = 0;
-    rxOverflow = false;
+    rx_head = 0;
+    rx_tail = 0;
+    rx_overflow = false;
     _U2RXIF = 0;
     _U2RXIE = 1;
 }

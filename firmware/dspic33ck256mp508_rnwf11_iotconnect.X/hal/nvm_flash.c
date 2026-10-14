@@ -1,8 +1,13 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
+
 #include <xc.h>
 #include <string.h>
 #include "nvm_flash.h"
 
-// NVMCON.NVMOP values - dsPIC33CK256MP508 Family Flash Programming
+// NVMCON.NVMOP values, dsPIC33CK256MP508 Family Flash Programming
 // Specification (DS70005300G), Register 3-1's NVMOP<3:0> field, matching
 // the worked page-erase (Table 3-6) and double-word-program (Table 3-7)
 // examples.
@@ -10,7 +15,7 @@
 #define NVMOP_DOUBLE_WORD 0x1U
 
 // Write latches always live at this fixed table-page/offset pair
-// regardless of the real destination address (Section 3.8) - the real
+// regardless of the real destination address (Section 3.8). The real
 // destination is set separately via NVMADR/NVMADRU below.
 #define NVM_WRITE_LATCH_TBLPAG 0xFAU
 
@@ -26,10 +31,28 @@ static bool NVM_FLASH_TriggerAndWait(uint16_t nvmop)
     NVMCONbits.WREN = 1;
     NVMCONbits.NVMOP = nvmop;
 
+    // Interrupts stay off for the WHOLE erase/write, not just the unlock.
+    // The operation is self-timed by hardware and can take several
+    // milliseconds, during which the motor control loop's ADC interrupt
+    // (every 50us, HAL_MC1ADCInterrupt, bldc_main.c) would otherwise keep
+    // firing and fetching code from flash while an erase/write is
+    // physically in progress elsewhere in the same flash array. This is
+    // undefined per the Flash Programming Specification, and confirmed on
+    // real hardware to silently hang the device (every trap handler in
+    // trap.c is a bare while(1) with no output, so this looks like total
+    // silence, not a crash). This was never hit before: NVM_FLASH_SelfTest()
+    // only runs at boot, before the ADC interrupt's timer is even running.
+    // DEVICE_CONFIG_Save() arriving from a live reprovisioning request
+    // while the motor control loop is already active is the first real
+    // exercise of this path.
+    __builtin_disable_interrupts();
+
     // The NVMKEY unlock sequence must be immediately followed by setting
     // WR with nothing else executing in between (not even an ISR), or the
     // unlock is silently aborted - __builtin_disi() guarantees that
-    // window, matching how Microchip's own reference drivers do this.
+    // window, matching how Microchip's own reference drivers do this (kept
+    // alongside the broader interrupt-disable above, which covers the rest
+    // of the self-timed wait that disi()'s 5-cycle window does not).
     __builtin_disi(5);
     NVMKEY = 0x55;
     NVMKEY = 0xAA;
@@ -37,13 +60,15 @@ static bool NVM_FLASH_TriggerAndWait(uint16_t nvmop)
     __builtin_nop();
     __builtin_nop();
 
-    while (NVMCONbits.WR == 1)
-    {
+    while (NVMCONbits.WR == 1) {
         // Self-timed by hardware; poll since we get here right after
-        // setting WR.
+        // setting WR. Interrupts remain disabled for this entire wait.
     }
     bool ok = (NVMCONbits.WRERR == 0);
     NVMCONbits.WREN = 0;
+
+    __builtin_enable_interrupts();
+
     return ok;
 }
 
@@ -57,13 +82,11 @@ bool NVM_FLASH_WriteBytes(uint32_t offset, const uint8_t *data, uint16_t len)
 {
     const uint16_t double_word_bytes = 2U * NVM_FLASH_WORD_SIZE;
 
-    if ((offset % double_word_bytes) != 0U || (len % double_word_bytes) != 0U)
-    {
+    if ((offset % double_word_bytes) != 0U || (len % double_word_bytes) != 0U) {
         return false;
     }
 
-    for (uint16_t written = 0; written < len; written += double_word_bytes)
-    {
+    for (uint16_t written = 0; written < len; written += double_word_bytes) {
         uint16_t lsw0 = (uint16_t)data[written] | ((uint16_t)data[written + 1] << 8);
         uint16_t lsw1 = (uint16_t)data[written + 2] | ((uint16_t)data[written + 3] << 8);
 
@@ -78,8 +101,7 @@ bool NVM_FLASH_WriteBytes(uint32_t offset, const uint8_t *data, uint16_t len)
         // units (NVM_FLASH_WORD_SIZE bytes per slot == 2 PC units per slot).
         NVM_FLASH_SetAddress(NVM_FLASH_CONFIG_PAGE_ADDR + offset + written);
 
-        if (!NVM_FLASH_TriggerAndWait(NVMOP_DOUBLE_WORD))
-        {
+        if (!NVM_FLASH_TriggerAndWait(NVMOP_DOUBLE_WORD)) {
             return false;
         }
     }
@@ -88,14 +110,12 @@ bool NVM_FLASH_WriteBytes(uint32_t offset, const uint8_t *data, uint16_t len)
 
 void NVM_FLASH_ReadBytes(uint32_t offset, uint8_t *data, uint16_t len)
 {
-    for (uint16_t i = 0; i < len; i += NVM_FLASH_WORD_SIZE)
-    {
+    for (uint16_t i = 0; i < len; i += NVM_FLASH_WORD_SIZE) {
         uint32_t addr = NVM_FLASH_CONFIG_PAGE_ADDR + offset + i;
         TBLPAG = (uint16_t)(addr >> 16);
         uint16_t lsw = __builtin_tblrdl((uint16_t)(addr & 0xFFFFUL));
         data[i] = (uint8_t)(lsw & 0xFFU);
-        if ((uint16_t)(i + 1U) < len)
-        {
+        if ((uint16_t)(i + 1U) < len) {
             data[i + 1U] = (uint8_t)(lsw >> 8);
         }
     }
@@ -106,12 +126,10 @@ bool NVM_FLASH_SelfTest(void)
     static const uint8_t pattern[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78};
     uint8_t readback[sizeof(pattern)];
 
-    if (!NVM_FLASH_ErasePage())
-    {
+    if (!NVM_FLASH_ErasePage()) {
         return false;
     }
-    if (!NVM_FLASH_WriteBytes(0, pattern, sizeof(pattern)))
-    {
+    if (!NVM_FLASH_WriteBytes(0, pattern, sizeof(pattern))) {
         return false;
     }
     NVM_FLASH_ReadBytes(0, readback, sizeof(readback));

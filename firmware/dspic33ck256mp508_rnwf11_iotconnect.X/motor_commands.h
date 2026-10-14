@@ -1,3 +1,8 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
+
 #ifndef MOTOR_COMMANDS_H
 #define	MOTOR_COMMANDS_H
 

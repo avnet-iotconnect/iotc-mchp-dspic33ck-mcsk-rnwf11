@@ -1,3 +1,8 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
+ */
+
 #include <xc.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -29,19 +34,15 @@ void DEBUG_Printf(const char *format, ...)
     int length = vsnprintf(line, sizeof(line), format, args);
     va_end(args);
 
-    if (length < 0)
-    {
+    if (length < 0) {
         return;
     }
-    if (length > (int)(sizeof(line) - 1))
-    {
+    if (length > (int)(sizeof(line) - 1)) {
         length = (int)(sizeof(line) - 1);
     }
 
-    for (int i = 0; i < length; i++)
-    {
-        while (U1STAHbits.UTXBF)
-        {
+    for (int i = 0; i < length; i++) {
+        while (U1STAHbits.UTXBF) {
         }
         U1TXREG = (uint8_t)line[i];
     }
@@ -49,7 +50,6 @@ void DEBUG_Printf(const char *format, ...)
 
 void DEBUG_Flush(void)
 {
-    while (!U1STAbits.TRMT)
-    {
+    while (!U1STAbits.TRMT) {
     }
 }

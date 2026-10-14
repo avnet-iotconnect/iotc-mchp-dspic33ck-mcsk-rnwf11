@@ -169,18 +169,37 @@ def main():
     print(f"Resolved C2D topic: {identity.topics.c2d}")
     print(f"Resolved ack topic: {identity.topics.ack}")
 
-    try:
-        write_config_header(args.config_header, args.wifi_ssid, args.wifi_password, identity)
-    except OSError as e:
-        print(f"FAILED: could not update {args.config_header}: {e}")
-        sys.exit(1)
-    except DeviceConfigError as e:
-        print(f"FAILED: {e}")
-        sys.exit(1)
+    # Only the default path is optional: someone who downloaded just the
+    # quickstart files (no firmware/ source tree - see the README) has
+    # nothing at this path, and that's fine as long as --port is going to
+    # configure the board directly instead. An EXPLICITLY-passed
+    # --config-header is a real request to update that file, so a missing
+    # path there still fails loudly rather than being silently skipped.
+    using_default_header_path = (args.config_header == DEFAULT_CONFIG_HEADER)
+    header_updated = False
+    if using_default_header_path and not args.config_header.exists():
+        print(f"Note: {args.config_header} not found - skipping the compiled-in config header "
+              "(expected if you downloaded just the quickstart files rather than the full "
+              "firmware source).")
+    else:
+        try:
+            write_config_header(args.config_header, args.wifi_ssid, args.wifi_password, identity)
+            header_updated = True
+        except OSError as e:
+            print(f"FAILED: could not update {args.config_header}: {e}")
+            sys.exit(1)
+        except DeviceConfigError as e:
+            print(f"FAILED: {e}")
+            sys.exit(1)
 
     if not args.port:
-        print("SUCCESS: config header updated. Rebuild and reflash the firmware to apply it.")
-        return
+        if header_updated:
+            print("SUCCESS: config header updated. Rebuild and reflash the firmware to apply it.")
+            return
+        print("FAILED: nothing to do - pass --port to configure an already-flashed board "
+              "directly over serial, or run this from a full clone of the repo (with the "
+              "firmware/ source present) to update the config header instead.")
+        sys.exit(1)
 
     fields = {
         "WIFI_SSID": args.wifi_ssid,

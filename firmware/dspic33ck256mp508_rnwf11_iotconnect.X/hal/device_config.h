@@ -1,16 +1,22 @@
-/**
- * @file device_config.h
- * @brief WiFi + IoTConnect connection settings, persisted in on-chip flash
- *        (see hal/nvm_flash.c) and written by
- *        tools/provision_device_config.py/.ps1 over the UART1 debug
- *        console using the same line-based protocol as the main
- *        dsPIC33AK512MPS512 branch (see iotconnect/provisioning.c) - the
- *        scripts are unmodified between branches, so every field they send
- *        (including IOTC_CPID/IOTC_ENV, which this board's runtime never
- *        reads) has to be accepted here or provisioning fails outright.
+/* SPDX-License-Identifier: MIT
+ * Copyright (C) 2026 Avnet
+ * Authors: Zackary Andraka <zackary.andraka@avnet.com> et al.
  */
+
+// WiFi + IoTConnect connection settings, persisted in on-chip flash (see
+// hal/nvm_flash.c) and written by tools/provision_device_config.py/.ps1
+// over the UART1 debug console using the same line-based protocol as the
+// main dsPIC33AK512MPS512 branch (see iotconnect/provisioning.c). The
+// scripts are unmodified between branches, so every field they send
+// (including IOTC_CPID/IOTC_ENV, which this board's runtime never reads)
+// has to be accepted here or provisioning fails outright.
+
 #ifndef DEVICE_CONFIG_H
 #define DEVICE_CONFIG_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -25,7 +31,7 @@ typedef struct
     char wifi_ssid[33];
     char wifi_password[65];
 
-    // Not used by this board's connect logic at runtime - stored only so
+    // Not used by this board's connect logic at runtime, stored only so
     // the unmodified provisioning scripts (which always send these) don't
     // hit an "unknown key" error.
     char iotc_cpid[17];
@@ -33,7 +39,7 @@ typedef struct
 
     // Resolved once by tools/provision_device_config.py (IoTConnect DRA
     // discovery+identity) and baked in here, rather than the firmware doing
-    // live HTTPS discovery itself - matches the main branch's approach.
+    // live HTTPS discovery itself, matching the main branch's approach.
     // The script sends this as "IOTC_DUID", but it's IoTConnect's resolved
     // MQTT client ID (not necessarily the raw Unique ID), so it's named to
     // match this board's existing IOTC_MQTT_CLIENT_ID convention.
@@ -54,23 +60,22 @@ typedef struct
     char rnwf_key_name[33];
 
     uint32_t crc32; // over every field above, see device_config.c
-} device_config_t;
+} DeviceConfig;
 
-/**
- * @brief Loads the config from flash into *out.
- * @return true if a validly-provisioned config was found (magic + CRC32 match).
- *         false if the device has not been provisioned yet (or the flash
- *         page was erased/corrupt) - the caller should fall back to the
- *         compile-time IOTC_* defaults in iotconnect_rnwf11_config.h rather
- *         than trust *out.
- */
-bool DEVICE_CONFIG_Load(device_config_t *out);
+// Loads the config from flash into *out. Returns true if a
+// validly-provisioned config was found (magic + CRC32 match), false if the
+// device has not been provisioned yet (or the flash page was
+// erased/corrupt), in which case the caller should fall back to the
+// compile-time IOTC_* defaults in iotconnect_rnwf11_config.h rather than
+// trust *out.
+bool DEVICE_CONFIG_Load(DeviceConfig *out);
 
-/**
- * @brief Erases the config flash page and writes *cfg (with a freshly
- *        computed CRC32 and DEVICE_CONFIG_MAGIC).
- * @return true on success.
- */
-bool DEVICE_CONFIG_Save(device_config_t *cfg);
+// Erases the config flash page and writes *cfg (with a freshly computed
+// CRC32 and DEVICE_CONFIG_MAGIC). Returns true on success.
+bool DEVICE_CONFIG_Save(DeviceConfig *cfg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DEVICE_CONFIG_H
