@@ -147,6 +147,40 @@ def collapse_latest(rows):
     return values, stamp, newest
 
 
+def latest_full_telemetry(feed):
+    """scope_feed (see fetch_scope_history()) -> (attrs, dTime) for the most
+    recent message that is a full motor-telemetry publish, identified by
+    carrying "run" - IOTC_RNWF11_PublishTelemetry() always publishes
+    run/st/sec/rpm/spd/ic/im/duty/vdc together in one message (same marker
+    dashboard.html's own comment already relies on), so "run" present is a
+    reliable tag for "this message is one of those", not a coincidence.
+    (None, None) if the lookback window has no such message.
+
+    Confirmed against a real /api/dash/telemetry response: /Telemetry/
+    device/{guid} (collapse_latest() below) served an internally-consistent
+    but completely stale run/st/spd/duty snapshot - run=0 ("waiting"),
+    spd/duty mid-ramp values that didn't match anything the device was
+    doing - stamped with a timestamp only ~2s newer than the device's actual
+    last real publish, so age-based freshness gating on that read can never
+    catch this: the bad data arrives with a good-looking stamp attached.
+    This history feed doesn't share that failure mode - each item is one
+    genuine raw MESSAGE the device actually sent, with its own real dTime -
+    so picking the newest one by timestamp is trustworthy in a way "latest
+    value per attribute" apparently is not. Preferred over collapse_latest()
+    for exactly this attribute group wherever it's available; collapse_latest()
+    is kept only as a fallback for when the lookback window has no telemetry
+    message at all (e.g. device offline longer than SCOPE_HISTORY_LOOKBACK_MIN)."""
+    best = None
+    for item in feed:
+        attr = item.get("attr")
+        if not isinstance(attr, dict) or "run" not in attr:
+            continue
+        ts = item.get("dTime") or ""
+        if best is None or ts > best[1]:
+            best = (attr, ts)
+    return best if best else (None, None)
+
+
 def parse_array(text):
     """'[0,500,1000]' -> [0, 500, 1000] - the bracketed-array-as-text format
     the firmware publishes osc_t/osc_v in (see the main README's "Software
@@ -375,8 +409,12 @@ def dash(event, path, method, headers, body_raw):
                 return resp(400, {"error": "guid is required"})
             # Latest-value read (confirmed: this is genuinely a "latest value
             # only" endpoint, never history - see the module comment above
-            # reconstruct_capture()) - fine for these, they're only ever
-            # displayed as their current value anyway.
+            # reconstruct_capture()). Used as the base values/age below, but
+            # the motor-telemetry fields specifically get overridden further
+            # down by latest_full_telemetry() once the history feed is in
+            # hand - see its docstring for why this endpoint can't be trusted
+            # for those. Left as the only source for osc_ch/osc_rate/osc_len
+            # and whatever else a future template field adds.
             rows = c._req("GET", telemetry_base(c) + "/Telemetry/device/" + guid).get("data", [])
             values, stamp, newest = collapse_latest(rows)
             age = None
@@ -397,6 +435,24 @@ def dash(event, path, method, headers, body_raw):
             if duid:
                 scope_feed, scope_raw = fetch_scope_history(c, duid)
                 capture = reconstruct_capture(scope_feed)
+
+            # Override the motor-telemetry fields with the history feed's own
+            # most recent full-telemetry message - see latest_full_telemetry()'s
+            # docstring for why collapse_latest()'s read of these same fields
+            # can't be trusted. osc_ch/osc_rate/osc_len/random (not part of a
+            # full-telemetry message) are left exactly as collapse_latest() set
+            # them above.
+            telem_attr, telem_ts = latest_full_telemetry(scope_feed)
+            if telem_attr is not None:
+                values = dict(values)
+                values.update(telem_attr)
+                try:
+                    import datetime
+                    t0 = datetime.datetime.strptime(telem_ts[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                        tzinfo=datetime.timezone.utc)
+                    age = (datetime.datetime.now(datetime.timezone.utc) - t0).total_seconds()
+                except (ValueError, TypeError):
+                    pass
 
             # TEMPORARY: the envelope shape (top-level "feed" vs nested under
             # "data" vs a bare list) isn't confirmed against a real response

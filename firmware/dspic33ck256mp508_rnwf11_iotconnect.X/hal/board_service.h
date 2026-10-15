@@ -84,8 +84,9 @@
  */
 #define BOARD_SERVICE_TICK_COUNT   20
 
-#define HAL_MC1HallStateChangeInterrupt              _CNEInterrupt    
-#define HAL_MC1HallStateChangeDetectionEnable        CN_PortEEnable        
+#define HAL_MC1HallStateChangeInterrupt              _CNEInterrupt
+#define HAL_MC1HallStateChangeDetectionEnable        CN_PortEEnable
+#define HAL_MC1HallStateChangeDetectionDisable       CN_PortEDisable
 #define HAL_MC1HallStateChangeInterruptFlagClear    CN_InterruptPortEFlagClear
 #define HAL_MC1HallStateChangeMaxPeriodSet           SCCP4_SetTimerPeriod
 #define HAL_MC1HallStateChangeTimerPrescalerSet      SCCP4_SetTimerPrescaler    

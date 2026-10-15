@@ -456,8 +456,15 @@ void MCAPP_StateMachine(void)
             mcappData.calculateSpeed.speedValue = 0;
             MCAPP_InitControlParameters();
             MCAPP_InitMovingAvgCurrent();        //Routine to Initialize the Moving Average Filter Block
-            MCAPP_InitMovingAvgSpeed();     
-            HAL_MC1HallStateChangeDetectionEnable();
+            MCAPP_InitMovingAvgSpeed();
+            // Hall detection is armed only on an actual motor-start (see
+            // MCAPP_CMD_WAIT below), not here - staying armed while idle let
+            // a stray hall edge (noise, EMI, even residual induced EMF with
+            // the phases floating) feed MCAPP_SpeedCalculate() a bogus
+            // nonzero speed, computed against a timerPrev long since
+            // invalidated by many timer wraps the single-wrap correction
+            // doesn't account for. See MCAPP_STOP below, where detection is
+            // disabled the moment the motor actually stops.
             mcappData.state = MCAPP_CMD_WAIT;
             
         break;
@@ -574,14 +581,27 @@ void MCAPP_StateMachine(void)
             break;
         
         case MCAPP_STOP:
-            
+
             mcappData.sector = 0;
-            
+
+            // Disable hall detection the moment the motor actually stops,
+            // and reset the speed-measurement state along with it - see the
+            // comment in MCAPP_INIT above for why a still-armed hall
+            // interrupt while stopped produces a bogus nonzero measured
+            // speed from a single stray edge. timerPrev/timerDelta are reset
+            // too, not just speedValue, so the first real transition after
+            // the next motor-start computes against a fresh reference
+            // instead of one left over from before this stop.
+            HAL_MC1HallStateChangeDetectionDisable();
+            mcappData.calculateSpeed.speedValue = 0;
+            mcappData.calculateSpeed.timerPrev = 0;
+            mcappData.calculateSpeed.timerDelta = 0;
+
             /** Set Duty Cycle */
             mcappData.dutyCycle = 0;
             HAL_MC1PWMSetDutyCyclesIdentical(mcappData.dutyCycle);
             HAL_MC1PWMDisableOutputs();
-            
+
             mcappData.state = MCAPP_INIT;
             
         break;

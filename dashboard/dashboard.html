@@ -347,7 +347,6 @@ const STATES={0:"init",1:"waiting",2:"offset cal",3:"running",4:"reversing",5:"s
 // still available, just via the oscilloscope's bus/phase A/phase B channels.
 const TILES=[["run",v=>v==1?"yes":"no","Motor running"],
             ["st",v=>STATES[v]||v,"State"],
-            ["sec",v=>v,"Commutation sector"],
             ["rpm",v=>v,"Requested speed","rpm"],
             ["spd",v=>v,"Measured speed","rpm"],
             ["vdc",v=>(v*0.002176).toFixed(2),"Bus voltage","V"]];
@@ -586,8 +585,9 @@ async function refresh(){
   // wobble reset the candidate before two EXACT matches ever lined up,
   // despite /IOTCONNECT's own Live Data tab already showing the change
   // immediately. Confirmation is now keyed on TELEMETRY_STATE_KEYS
-  // (run/st/sec) only - discrete values that don't naturally drift between
-  // real reads of the same state, so they normally confirm in exactly one
+  // (run/st - "sec" is deliberately excluded, see its definition above) -
+  // discrete values that don't naturally drift between real reads of the
+  // same state, so they normally confirm in exactly one
   // extra poll. Once that discrete state is trusted, the numeric fields
   // from that SAME response are rendered immediately alongside it, with no
   // separate confirmation of their own - they came from the one read that
