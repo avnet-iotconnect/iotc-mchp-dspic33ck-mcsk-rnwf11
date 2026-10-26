@@ -24,6 +24,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# -Duid ends up both in a file path (Join-Path below) and in the cert's
+# X.509 subject string (New-DeviceCert's -subj "...CN=$Duid"), where a '/'
+# would inject an extra DN field and other shell/path-special characters
+# could do worse; -CaName/-CertName/-KeyName end up inside a double-quoted
+# AT+FS filename argument sent straight to the RNWF11, where an embedded '"'
+# would break out of it. Restricting all four to a safe, boring character
+# set up front catches a copy-paste accident here instead of a confusing
+# failure deep inside openssl or the AT-command exchange.
+function Test-SafeIdentifier {
+    param([string]$Value, [string]$ParamName)
+    if ($Value -notmatch '^[A-Za-z0-9_.-]+$') {
+        throw "-$ParamName may only contain letters, digits, '.', '_', and '-' (got: '$Value')"
+    }
+}
+Test-SafeIdentifier -Value $Duid -ParamName "Duid"
+Test-SafeIdentifier -Value $CaName -ParamName "CaName"
+Test-SafeIdentifier -Value $CertName -ParamName "CertName"
+Test-SafeIdentifier -Value $KeyName -ParamName "KeyName"
+
 $FILETYPE_CERT = 1
 $FILETYPE_PRIKEY = 2
 $XMODEM_CRC16 = 2

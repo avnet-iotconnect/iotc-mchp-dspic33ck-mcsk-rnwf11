@@ -33,26 +33,84 @@ param(
 $ErrorActionPreference = "Stop"
 $MqttPort = 8883
 
+# Windows PowerShell 5.1 runs on .NET Framework, whose default
+# ServicePointManager.SecurityProtocol on plenty of real-world Windows 10/11
+# installs does NOT include TLS 1.2 - Invoke-RestMethod against
+# discovery.iotconnect.io then fails outright with a generic "Could not
+# create SSL/TLS secure channel" error, before this script even gets to send
+# a real request. PowerShell 7+ (.NET 5+) already defaults to modern TLS and
+# ignores this setting, so forcing it here is harmless there too.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# WifiSsid/WifiPassword/Cpid/Env travel over the firmware's line-based
+# provisioning protocol (PROVISION/KEY=VALUE/END, see provisioning.h), which
+# has no per-field escaping - an embedded CR/LF would silently corrupt the
+# stream with an extra phantom line. A literal '"' is otherwise harmless
+# here, unlike the name fields below.
+function Test-NoLineBreak {
+    param([string]$Value, [string]$ParamName)
+    if ($Value -match '[\r\n]') {
+        throw "-$ParamName must not contain a line break"
+    }
+}
+foreach ($pair in @(
+    @{ Name = "WifiSsid"; Value = $WifiSsid }
+    @{ Name = "WifiPassword"; Value = $WifiPassword }
+    @{ Name = "Cpid"; Value = $Cpid }
+    @{ Name = "Env"; Value = $Env }
+)) {
+    Test-NoLineBreak -Value $pair.Value -ParamName $pair.Name
+}
+
+# CaName/CertName/KeyName get stored on the device and later embedded by the
+# firmware itself in a quoted AT+TLSC filename argument sent to the RNWF11
+# (iotconnect_rnwf11.c's Configure()) - same safe, boring character set
+# provision_rnwf11_cert.ps1 already requires for these same names, so an
+# embedded '"' can never reach that AT command in the first place.
+function Test-SafeIdentifier {
+    param([string]$Value, [string]$ParamName)
+    if ($Value -notmatch '^[A-Za-z0-9_.-]+$') {
+        throw "-$ParamName may only contain letters, digits, '.', '_', and '-' (got: '$Value')"
+    }
+}
+foreach ($pair in @(
+    @{ Name = "CaName"; Value = $CaName }
+    @{ Name = "CertName"; Value = $CertName }
+    @{ Name = "KeyName"; Value = $KeyName }
+)) {
+    Test-SafeIdentifier -Value $pair.Value -ParamName $pair.Name
+}
+
 function ConvertTo-CString {
     param([string]$Value)
     return $Value.Replace('\', '\\').Replace('"', '\"')
 }
 
-# Whole-line replacement of a '#define NAME "..."' line - simpler and safer
-# than a regex-based in-place substitution, since it sidesteps .NET's
-# replacement-string syntax (where a literal '$' - e.g. in an AWS topic like
-# "$aws/rules/...") would otherwise need its own escaping.
+# Replaces the quoted value on a '#define NAME "..."' line, preserving
+# everything else on that line untouched.
 function Set-Define {
     param([string[]]$Lines, [string]$Name, [string]$Value)
     $escaped = ConvertTo-CString -Value $Value
-    $prefix = "#define $Name "
+    # \s+ (any run of spaces/tabs), not a single hardcoded literal space - a
+    # single space matches this project's own header as written today, but
+    # is needlessly brittle: it would silently find zero matches (and throw)
+    # against a header reformatted with tab alignment, whereas
+    # provision_device_config.py's equivalent regex already tolerates it.
+    # Leading indent and anything after the closing quote (e.g. a trailing
+    # comment) are captured and preserved rather than anchored away, same
+    # reasoning.
+    $linePattern = "^(\s*)#define\s+$([regex]::Escape($Name))\s+`"[^`"]*`"(.*)$"
     $matchCount = 0
     for ($i = 0; $i -lt $Lines.Count; $i++) {
-        $trimmed = $Lines[$i].TrimStart()
-        if ($trimmed.StartsWith($prefix)) {
+        if ($Lines[$i] -match $linePattern) {
             $matchCount++
-            $indent = $Lines[$i].Substring(0, $Lines[$i].Length - $trimmed.Length)
-            $Lines[$i] = "$indent#define $Name `"$escaped`""
+            # Built via plain string interpolation, not .NET's -replace
+            # replacement-pattern syntax: $escaped can itself start with a
+            # literal '$' (an AWS IoT Rule topic looks like
+            # "$aws/rules/..."), which that syntax would otherwise try to
+            # interpret as a group-reference token - interpolation has no
+            # such special-casing, it just inserts the string value as-is.
+            $Lines[$i] = "$($Matches[1])#define $Name `"$escaped`"$($Matches[2])"
         }
     }
     if ($matchCount -ne 1) {
@@ -142,7 +200,14 @@ if ($usingDefaultHeaderPath -and -not (Test-Path -Path $ConfigHeader)) {
         "(expected if you downloaded just the quickstart files rather than the full firmware source).")
 } else {
     try {
-        $lines = Get-Content -Path $ConfigHeader
+        # -Encoding ASCII explicitly on both read and write: this header is
+        # plain 7-bit ASCII (matching the AT-command transport it's compiled
+        # into), and Windows PowerShell 5.1 vs PowerShell 7+ disagree on the
+        # DEFAULT text encoding (5.1's Set-Content -Encoding UTF8 always
+        # writes a BOM; 7+'s plain default does not) - a stray BOM at the top
+        # of a C header is usually tolerated but not guaranteed to be, and
+        # pinning ASCII sidesteps the question on both PowerShell versions.
+        $lines = Get-Content -Path $ConfigHeader -Encoding ASCII
         $defines = [ordered]@{
             IOTC_WIFI_SSID            = $WifiSsid
             IOTC_WIFI_PASSWORD        = $WifiPassword
@@ -156,7 +221,7 @@ if ($usingDefaultHeaderPath -and -not (Test-Path -Path $ConfigHeader)) {
         foreach ($name in $defines.Keys) {
             $lines = Set-Define -Lines $lines -Name $name -Value $defines[$name]
         }
-        Set-Content -Path $ConfigHeader -Value $lines
+        Set-Content -Path $ConfigHeader -Value $lines -Encoding ASCII
         Write-Host "Updated $ConfigHeader with your WiFi credentials and resolved IoTConnect connection info."
         $headerUpdated = $true
     } catch {
