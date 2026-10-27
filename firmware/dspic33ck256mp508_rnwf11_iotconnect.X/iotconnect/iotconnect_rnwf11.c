@@ -286,6 +286,16 @@ static bool IOTC_RNWF11_WaitForNetwork(void)
         if (net_up) {
             return true;
         }
+        // A reprovision request (new SSID/password) means whatever network
+        // this loop is waiting on is no longer the right one to wait for -
+        // s_cfg was just replaced out from under this attempt. Bail out now
+        // instead of waiting out the rest of the 20s timeout; Task() will
+        // retry immediately (retry_milliseconds was just reset) with the
+        // new config.
+        if (IOTC_RNWF11_CheckProvisioning()) {
+            DEBUG_Printf("IOTC: step WiFi-IP aborted, reprovisioned\r\n");
+            return false;
+        }
         __delay_ms(1);
     }
     DEBUG_Printf("IOTC: step WiFi-IP failed\r\n");
@@ -390,6 +400,13 @@ static bool IOTC_RNWF11_Configure(void)
     for (uint16_t slice = 0; (slice < 40000U) && !mqtt_link_up; slice++) {
         __delay_us(500);
         IOTC_RNWF11_PollEvents();
+        // Same reasoning as the WiFi-IP wait above: a reprovision mid-wait
+        // means this broker/cert/topic set is stale, so give up on it now
+        // rather than riding out the rest of this ~20s window.
+        if (IOTC_RNWF11_CheckProvisioning()) {
+            DEBUG_Printf("IOTC: step MQTT-connect-wait aborted, reprovisioned\r\n");
+            return false;
+        }
     }
     if (!mqtt_link_up) {
         DEBUG_Printf("IOTC: step MQTT-connect-wait timed out (no +MQTTCONN:1)\r\n");
@@ -970,7 +987,7 @@ void IOTC_RNWF11_Initialize(void)
 #endif
 }
 
-void IOTC_RNWF11_CheckProvisioning(void)
+bool IOTC_RNWF11_CheckProvisioning(void)
 {
 #if IOTC_RNWF11_ENABLE
     if (PROVISIONING_CheckForRequest()) {
@@ -981,8 +998,12 @@ void IOTC_RNWF11_CheckProvisioning(void)
             mqtt_link_up = false;
             retry_milliseconds = IOTC_RETRY_PERIOD_MS; // don't wait out the retry timer
             DEBUG_Printf("IOTC: reprovisioned, reconnecting\r\n");
+            return true;
         }
     }
+    return false;
+#else
+    return false;
 #endif
 }
 

@@ -123,7 +123,7 @@ int main(void)
         // MCAPP_Motor* in this file and IOTC_RNWF11_OnCommand() in
         // iotconnect/iotconnect_rnwf11.c).
         IOTC_RNWF11_SetTelemetry(&telemetry);
-        IOTC_RNWF11_CheckProvisioning();
+        (void)IOTC_RNWF11_CheckProvisioning();
         IOTC_RNWF11_Task();
     }
 }

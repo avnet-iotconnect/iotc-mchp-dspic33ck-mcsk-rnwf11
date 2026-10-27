@@ -39,7 +39,15 @@ bool IOTC_RNWF11_IsConnected(void);
 // alongside IOTC_RNWF11_Task(). A completed provisioning exchange briefly
 // blocks (see provisioning.c), which is fine here since motor control runs
 // entirely in the ADC ISR, independent of this superloop.
-void IOTC_RNWF11_CheckProvisioning(void);
+//
+// Returns true the instant a request was received and applied (s_cfg was
+// just replaced). IOTC_RNWF11_Task() also calls this from inside its own
+// multi-second WiFi-association and MQTT-connect-wait loops (not just once
+// per outer superloop pass) specifically so it can bail out of a stuck
+// connect attempt on an old/unreachable network the moment a reprovision
+// request arrives, rather than making it wait out the full 20s timeout
+// first - see the call sites in iotconnect_rnwf11.c.
+bool IOTC_RNWF11_CheckProvisioning(void);
 
 #ifdef __cplusplus
 }
