@@ -264,10 +264,42 @@ $fields = [ordered]@{
     RNWF_KEY_NAME    = $KeyName
 }
 
+# SerialPort.ReadLine() has a longstanding, well-documented .NET quirk on
+# Windows: it does not reliably honor ReadTimeout and can block
+# indefinitely waiting for its configured NewLine sequence if the device
+# never sends exactly that - reported as the exact symptom of this script
+# getting permanently stuck. ReadByte() does not share that problem, so
+# this reads one byte at a time instead, the same proven pattern
+# provision_rnwf11_cert.ps1 already uses throughout for the same reason.
+function Read-LineWithTimeout {
+    param([System.IO.Ports.SerialPort]$SerialPort, [int]$TimeoutMs)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $line = ""
+    while ($true) {
+        # Recomputed every iteration, not set once up front: ReadByte()'s own
+        # ReadTimeout contract lets a single call block up to that long, so
+        # a stale fixed value would let the last call overshoot the overall
+        # budget by nearly a full ReadTimeout on top of however much was
+        # already spent.
+        $remaining = $TimeoutMs - [int]$sw.ElapsedMilliseconds
+        if ($remaining -le 0) { break }
+        $SerialPort.ReadTimeout = $remaining
+        try {
+            $b = $SerialPort.ReadByte()
+        } catch [System.TimeoutException] {
+            break
+        }
+        if ($b -eq -1) { break }
+        $ch = [char]$b
+        if ($ch -eq "`n") { return $line }
+        if ($ch -ne "`r") { $line += $ch }
+    }
+    return $null
+}
+
 Write-Host "`nConnecting to $Port at $Baud baud..."
 try {
     $serialPort = New-Object -TypeName System.IO.Ports.SerialPort -ArgumentList @($Port, $Baud, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
-    $serialPort.NewLine = "`n"
     $serialPort.ReadTimeout = 5000
     $serialPort.Open()
 } catch {
@@ -301,12 +333,8 @@ try {
         }
         $serialPort.Write("END`n")
 
-        $response = $null
-        try {
-            $response = $serialPort.ReadLine().Trim()
-        } catch [System.TimeoutException] {
-            $response = $null
-        }
+        $response = Read-LineWithTimeout -SerialPort $serialPort -TimeoutMs 5000
+        if ($response) { $response = $response.Trim() }
 
         if ($response -eq "OK") {
             Write-Host "Device confirmed: OK"
